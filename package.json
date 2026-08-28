@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "github": "tsx src/githubScan.ts",
+    "pump-github": "tsx src/pumpGithubScan.ts",
     "scan": "tsx src/index.ts",
     "typecheck": "tsc --noEmit"
   },

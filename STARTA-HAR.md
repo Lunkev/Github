@@ -45,3 +45,9 @@ Allt nedan gör du EN gång. Totalt ~30–45 min. Sen sköter systemet sig själ
 - Launch som funkat? → klistra in i `#proven` (namn, ticker, tweet, GitHub-länk om det var ett repo-fynd)
 - Nytt repo att bevaka? → skriv `add <org eller org/repo>` i `#watchlist`
 - Alerts kommer i `#gems-hot` (pling) och `#gems-maybe` (skrolla när du har tid)
+
+## 8. Pump.fun GitHub-länkar (motsatt scanner)
+- [ ] Skapa kanal `#github-coins` (inte gems) → webhook → `DISCORD_WEBHOOK_PUMP_GITHUB` i `.env`
+- [ ] SQL: kör `github_coins`-tabellen i `supabase/schema.sql` om du inte körde hela filen på nytt
+- [ ] `npm run pump-github -- --selftest` sedan `npm run pump-github` (måste vara igång för att fånga launches)
+- [ ] För dygnet runt: Railway/Fly/PC — **inte** GitHub Actions eller Vercel

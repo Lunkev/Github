@@ -1,4 +1,5 @@
 import { config, hasKey } from "../config.js";
+import { postWebhook } from "../discord/webhook.js";
 import type { Finding } from "./judge.js";
 
 // Discord-alerts: hot -> #gems-hot direkt (dagtid), maybe -> #gems-maybe.
@@ -23,16 +24,6 @@ function ticker(f: Finding): string {
 function formatFinding(f: Finding, kind: "hot" | "maybe"): string {
   const header = kind === "hot" ? "🚨 GEM FOUND 🚨" : "👀 GEM MAYBE 👀";
   return [header, "", `${f.eggName} - ${ticker(f)}`, "", f.tweetDraft.trim(), "", f.hit.url].join("\n");
-}
-
-async function postWebhook(url: string, content: string): Promise<void> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content: content.slice(0, 1990) }),
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!res.ok) console.error(`Discord-webhook svarade ${res.status}`);
 }
 
 /** Postar fynd till rätt kanal. Returnerar de fynd som INTE postades (natt) för DB-kö. */

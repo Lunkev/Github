@@ -25,6 +25,51 @@ export interface RepoRef {
   repo: string;
 }
 
+export type RepoInfo =
+  | {
+      ok: true;
+      stars: number;
+      createdAt: string;
+      pushedAt: string;
+      language: string | null;
+      description: string | null;
+    }
+  | { ok: false; missing: boolean };
+
+/** Enskilt repo för enrich (404 = missing). */
+export async function getRepoInfo(owner: string, repo: string): Promise<RepoInfo> {
+  try {
+    const headers: Record<string, string> = {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "narrative-scanner",
+    };
+    if (config.githubToken) headers.Authorization = `Bearer ${config.githubToken}`;
+    const res = await fetch(`${BASE}/repos/${owner}/${repo}`, {
+      headers,
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (res.status === 404) return { ok: false, missing: true };
+    if (!res.ok) return { ok: false, missing: false };
+    const data = (await res.json()) as {
+      stargazers_count?: number;
+      created_at?: string;
+      pushed_at?: string;
+      language?: string | null;
+      description?: string | null;
+    };
+    return {
+      ok: true,
+      stars: data.stargazers_count ?? 0,
+      createdAt: data.created_at ?? "",
+      pushedAt: data.pushed_at ?? "",
+      language: data.language ?? null,
+      description: data.description ?? null,
+    };
+  } catch {
+    return { ok: false, missing: false };
+  }
+}
+
 /** Alla publika repos i en org (för org-bevakning + "nytt repo"-förslag). */
 export async function listOrgRepos(org: string): Promise<{ name: string; pushedAt: string }[]> {
   const data = await gh<{ name: string; pushed_at: string }[]>(

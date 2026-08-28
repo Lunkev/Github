@@ -118,3 +118,26 @@ create index if not exists idx_findings_created on findings (created_at);
 create index if not exists idx_signals_ran_at on signals (ran_at);
 create index if not exists idx_narratives_ran_at on narratives (ran_at);
 create index if not exists idx_proven_category on proven_coins (category);
+
+-- Pump.fun coins vars website pekar på GitHub (live-scannern).
+create table if not exists github_coins (
+  mint text primary key,
+  name text not null default '',
+  symbol text not null default '',
+  website text not null,
+  github_url text not null,
+  github_owner text not null,
+  github_repo text,
+  repo_stars int,
+  repo_created_at timestamptz,
+  repo_age_days int,
+  repo_language text,
+  market_cap numeric,
+  found_at timestamptz not null default now(),
+  source text not null check (source in ('live','backfill')),
+  queued_for_morning boolean default false,
+  repo_missing boolean default false
+);
+
+create index if not exists idx_github_coins_found on github_coins (found_at desc);
+create index if not exists idx_github_coins_queued on github_coins (queued_for_morning) where queued_for_morning = true;
