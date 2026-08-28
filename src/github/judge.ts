@@ -54,7 +54,7 @@ ${provenPatterns || "(tomt än)"}
 RÅTRÄFFAR:
 ${hitText}
 
-För hot/maybe: skriv tweetDraft i denna stil: "Yo guys just found this crazy easter egg hidden in the official @X github repo. <namn> ($<TICKER>), soft shilled by <företag> in their own repo and we never ran it yet???"
+För hot/maybe: skriv tweetDraft. Om TWEET-exempel finns under bevisade mönster: kopiera DEN stilen (rytm, slang, punchline) men byt namn/ticker/repo. Annars använd: "Yo guys just found this crazy easter egg hidden in the official @X github repo. <namn> ($<TICKER>), soft shilled by <företag> in their own repo and we never ran it yet???"
 
 Svara ENDAST med JSON: {"findings":[{"hitIndex":0,"verdict":"hot|maybe|skip","eggName":"...","tickerSuggestion":"$...","tweetDraft":"...","reasoning":"..."}]}
 Ta bara med hot och maybe i svaret.`;

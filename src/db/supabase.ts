@@ -49,14 +49,15 @@ export async function getProvenPatterns(): Promise<string> {
   if (!db) return "";
   const { data, error } = await db
     .from("proven_coins")
-    .select("ticker, narrative, category, peak_mcap_usd, notes")
+    .select("ticker, narrative, category, peak_mcap_usd, notes, tweet_text")
     .order("peak_mcap_usd", { ascending: false })
     .limit(30);
   if (error || !data) return "";
   return data
-    .map(
-      (c) =>
-        `- ${c.ticker} (${c.category}): "${c.narrative}" → peak ~$${Math.round((c.peak_mcap_usd ?? 0) / 1000)}k${c.notes ? ` — ${c.notes}` : ""}`,
-    )
+    .map((c) => {
+      const tweet = (c.tweet_text as string | null)?.trim();
+      const tweetBit = tweet ? `\n  TWEET:\n${tweet}` : "";
+      return `- ${c.ticker} (${c.category}): "${c.narrative}" → peak ~$${Math.round((c.peak_mcap_usd ?? 0) / 1000)}k${c.notes ? ` — ${c.notes}` : ""}${tweetBit}`;
+    })
     .join("\n");
 }

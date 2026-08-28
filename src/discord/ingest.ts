@@ -59,7 +59,8 @@ const ProvenSchema = z.object({
   category: z.string(),
   copy_style: z.string(),
   github_link: z.string().nullable(),
-  new_lexicon_terms: z.array(z.string()), // generaliseringen: nya söktermer detta fynd lär oss
+  tweet_text: z.string().optional().default(""),
+  new_lexicon_terms: z.array(z.string()),
   notes: z.string(),
 });
 
@@ -80,13 +81,17 @@ export async function ingestProven(): Promise<number> {
       messages: [
         {
           role: "user",
-          content: `En memecoin-deployer skickar in en BEVISAD launch till sitt mönsterbibliotek. Strukturera den. Viktigast: "new_lexicon_terms" — 2-6 nya GENERELLA söktermer som detta fynd lär oss att leta efter i GitHub-repos (t.ex. lärde $MYC oss "my coin" och "example metadata"). Termerna ska vara breda nog att hitta NÄSTA fynd, inte bara detta.
+          content: `En memecoin-deployer skickar in en BEVISAD launch till sitt mönsterbibliotek. Strukturera den.
+
+Viktigast:
+1. "tweet_text" — det EXAKTA X-inlägget från inskicket, verbatim, radbrytningar bevarade. Parafrasera INTE. Om flera stycken ser ut som tweeten: ta hela tweet-blocket. Finns ingen tweet: tom sträng "".
+2. "new_lexicon_terms" — 2-6 nya GENERELLA söktermer att leta efter i GitHub-repos (t.ex. lärde $MYC oss "my coin" och "example metadata").
 
 Inskick:
 """${m.content.slice(0, 3000)}"""
 
 Svara ENDAST med JSON:
-{"ticker":"$...","name":"...","narrative":"...","category":"...","copy_style":"...","github_link":null,"new_lexicon_terms":["..."],"notes":"..."}`,
+{"ticker":"$...","name":"...","narrative":"...","category":"...","copy_style":"...","github_link":null,"tweet_text":"...","new_lexicon_terms":["..."],"notes":"..."}`,
         },
       ],
     });
@@ -104,7 +109,9 @@ Svara ENDAST med JSON:
           narrative: parsed.narrative,
           category: parsed.category,
           source_platform: parsed.github_link ? "github" : null,
-          notes: `${parsed.copy_style} | ${parsed.notes} | ${parsed.github_link ?? ""}`,
+          notes: parsed.notes,
+          source_message: m.content.slice(0, 4000),
+          tweet_text: parsed.tweet_text.trim() || m.content.slice(0, 4000),
         });
         if (error) console.error("proven_coins insert:", error.message);
       }

@@ -46,6 +46,8 @@ create table if not exists proven_coins (
   time_to_peak_hours numeric,  -- hur snabbt stängde fönstret?
   source_platform text,        -- var föddes narrativet? tiktok/x/news/reddit
   notes text,                  -- fritext: varför funkade den?
+  source_message text,         -- exakt Discord-paste från #proven
+  tweet_text text,             -- exakt X-inlägg, verbatim
   created_at timestamptz default now()
 );
 
@@ -103,6 +105,10 @@ create table if not exists scan_state (
   value text not null,
   updated_at timestamptz default now()
 );
+
+-- Befintliga projekt: nya kolumner (idempotent).
+alter table proven_coins add column if not exists source_message text;
+alter table proven_coins add column if not exists tweet_text text;
 
 -- Fingerprint = repo|path|lower(egg_name). Unikt så samma gem inte alertas två gånger.
 alter table findings add column if not exists fingerprint text;
