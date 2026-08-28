@@ -7,8 +7,28 @@ import type { RawHit } from "../github/scan.js";
 // fallback-watchlist + diff-fönster = senaste 24h. Funkar för test, DB krävs för skarp drift.
 
 let client: SupabaseClient | null = null;
+let warnedKey = false;
+
+function warnIfAnonKey(key: string): void {
+  if (warnedKey) return;
+  warnedKey = true;
+  try {
+    const payload = JSON.parse(Buffer.from(key.split(".")[1] ?? "", "base64url").toString("utf8")) as {
+      role?: string;
+    };
+    if (payload.role && payload.role !== "service_role") {
+      console.error(
+        `⚠️  SUPABASE_SERVICE_KEY har role="${payload.role}". Det är anon-nyckeln — RLS blockerar alla writes. Byt till service_role (Project Settings → API).`,
+      );
+    }
+  } catch {
+    /* nyckeln är inte en JWT — strunta i varningen */
+  }
+}
+
 function db(): SupabaseClient | null {
   if (!hasKey.supabase()) return null;
+  warnIfAnonKey(config.supabaseServiceKey);
   if (!client) client = createClient(config.supabaseUrl, config.supabaseServiceKey);
   return client;
 }
@@ -30,8 +50,15 @@ export async function getWatchlist(): Promise<WatchEntry[]> {
   return data.map((r) => ({ target: r.target, deepScannedAt: r.deep_scanned_at }));
 }
 
-export async function addWatchTarget(target: string, addedBy: string): Promise<void> {
-  await db()?.from("watch_repos").upsert({ target, added_by: addedBy, active: true }, { onConflict: "target" });
+export async function addWatchTarget(target: string, addedBy: string): Promise<boolean> {
+  const d = db();
+  if (!d) return false;
+  const { error } = await d.from("watch_repos").upsert({ target, added_by: addedBy, active: true }, { onConflict: "target" });
+  if (error) {
+    console.error("watch_repos upsert:", error.message);
+    return false;
+  }
+  return true;
 }
 
 export async function markDeepScanned(target: string): Promise<void> {
@@ -48,11 +75,13 @@ export async function getLearnedTerms(): Promise<string[]> {
 
 export async function addLearnedTerms(terms: string[], learnedFrom: string): Promise<void> {
   if (terms.length === 0) return;
-  await db()
-    ?.from("lexicon")
-    .upsert(terms.map((term) => ({ term: term.toLowerCase(), learned_from: learnedFrom })), {
-      onConflict: "term",
-    });
+  const d = db();
+  if (!d) return;
+  const { error } = await d.from("lexicon").upsert(
+    terms.map((term) => ({ term: term.toLowerCase(), learned_from: learnedFrom })),
+    { onConflict: "term" },
+  );
+  if (error) console.error("lexicon upsert:", error.message);
 }
 
 /** Nyckel/värde-state: senaste körning, senaste Discord-meddelande-id per kanal, etc. */
@@ -64,7 +93,8 @@ export async function getState(key: string): Promise<string | null> {
 }
 
 export async function setState(key: string, value: string): Promise<void> {
-  await db()?.from("scan_state").upsert({ key, value }, { onConflict: "key" });
+  const { error } = (await db()?.from("scan_state").upsert({ key, value }, { onConflict: "key" })) ?? {};
+  if (error) console.error("scan_state upsert:", error.message);
 }
 
 export function findingFingerprint(repo: string, path: string, eggName: string): string {

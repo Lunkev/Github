@@ -26,7 +26,9 @@ Allt nedan gör du EN gång. Totalt ~30–45 min. Sen sköter systemet sig själ
 ## 5. Supabase (10 min)
 - [ ] supabase.com → New project (gratis)
 - [ ] SQL Editor → klistra in hela `supabase/schema.sql` → Run
-- [ ] Project Settings → API: kopiera Project URL → `SUPABASE_URL` och service_role-nyckeln → `SUPABASE_SERVICE_KEY`
+- [ ] Project Settings → API: kopiera Project URL → `SUPABASE_URL`
+- [ ] **service_role**-nyckeln (Reveal, *inte* `anon` / `publishable`) → `SUPABASE_SERVICE_KEY`
+  - anon-nyckeln blockeras av RLS — tabellerna blir tomma även om scannen "lyckas"
 
 ## 6. Testa lokalt (5 min)
 - [ ] `npm run github -- --dry` — ska lista vad den SKULLE skanna (funkar utan alla nycklar)

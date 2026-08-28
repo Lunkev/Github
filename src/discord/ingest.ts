@@ -45,8 +45,7 @@ export async function ingestWatchlist(): Promise<string[]> {
   for (const m of msgs) {
     const match = m.content.trim().match(/^add\s+([\w.-]+(?:\/[\w.-]+)?)/i);
     if (match) {
-      await addWatchTarget(match[1], m.author.username);
-      added.push(match[1]);
+      if (await addWatchTarget(match[1], m.author.username)) added.push(match[1]);
     }
   }
   if (msgs.length > 0) await setState(stateKey, msgs[msgs.length - 1].id);
@@ -99,7 +98,7 @@ Svara ENDAST med JSON:
       const parsed = ProvenSchema.parse(JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)));
       if (hasKey.supabase()) {
         const db = createClient(config.supabaseUrl, config.supabaseServiceKey);
-        await db.from("proven_coins").insert({
+        const { error } = await db.from("proven_coins").insert({
           ticker: parsed.ticker,
           name: parsed.name,
           narrative: parsed.narrative,
@@ -107,6 +106,7 @@ Svara ENDAST med JSON:
           source_platform: parsed.github_link ? "github" : null,
           notes: `${parsed.copy_style} | ${parsed.notes} | ${parsed.github_link ?? ""}`,
         });
+        if (error) console.error("proven_coins insert:", error.message);
       }
       await addLearnedTerms(parsed.new_lexicon_terms, parsed.ticker);
       count++;
