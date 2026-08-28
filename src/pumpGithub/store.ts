@@ -25,6 +25,8 @@ export interface GithubCoinRow {
   source: "live" | "backfill";
   queued_for_morning: boolean;
   repo_missing: boolean;
+  twitter_url: string | null;
+  tweet_text: string | null;
 }
 
 export async function mintSeen(mint: string): Promise<boolean> {

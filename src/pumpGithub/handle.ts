@@ -1,9 +1,10 @@
 import { isDaytime } from "../github/alert.js";
-import { extractWebsite, parseGithubUrl } from "./check.js";
+import { extractTwitter, extractWebsite, parseGithubUrl, parseStatusUrl } from "./check.js";
 import { fetchMetadata } from "./meta.js";
 import { enrichGithub } from "./githubEnrich.js";
 import { mintSeen, saveGithubCoin, type GithubCoinRow } from "./store.js";
 import { sendGithubCoinAlert } from "./alert.js";
+import { fetchTweetText } from "./tweet.js";
 
 export interface NewTokenEvent {
   mint: string;
@@ -33,6 +34,10 @@ export async function handleNewToken(
     const gh = parseGithubUrl(website);
     if (!gh) return "skip";
 
+    const twitterRaw = extractTwitter(meta);
+    const status = twitterRaw ? parseStatusUrl(twitterRaw) : null;
+    const tweetText = status ? await fetchTweetText(status.id, status.url) : null;
+
     const enrich = await enrichGithub(gh.owner, gh.repo);
     const queued = !isDaytime();
     const row: GithubCoinRow = {
@@ -52,6 +57,8 @@ export async function handleNewToken(
       source,
       queued_for_morning: queued,
       repo_missing: enrich.missing,
+      twitter_url: status?.url ?? twitterRaw,
+      tweet_text: tweetText,
     };
 
     await saveGithubCoin(row);

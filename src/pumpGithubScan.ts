@@ -2,7 +2,7 @@
 //   npm run pump-github              live websocket
 //   npm run pump-github -- --selftest  CyberLeek extensions.website (ingen GitHub-träff)
 //   npm run pump-github -- --once <uri>  hämta en metadata-URI och visa resultat
-import { extractWebsite, parseGithubUrl } from "./pumpGithub/check.js";
+import { extractTwitter, extractWebsite, parseGithubUrl, parseStatusUrl } from "./pumpGithub/check.js";
 import { fetchMetadata } from "./pumpGithub/meta.js";
 import { connectLive } from "./pumpGithub/live.js";
 
@@ -16,9 +16,14 @@ function selftest(): number {
   };
   const site = extractWebsite(meta);
   const gh = site ? parseGithubUrl(site) : null;
+  const tw = extractTwitter({ twitter: "https://x.com/foo/status/1234567890123456789" });
+  const status = tw ? parseStatusUrl(tw) : null;
+  const twitterOk = status?.id === "1234567890123456789";
+  const profileIgnored = parseStatusUrl("https://x.com/elonmusk") === null;
   console.log(`selftest website: ${site}`);
   console.log(`selftest github: ${gh ? gh.url : "(none — expected)"}`);
-  const ok = site === "https://leek.ar.io" && gh === null;
+  console.log(`selftest status id: ${status?.id ?? "(none)"}`);
+  const ok = site === "https://leek.ar.io" && gh === null && twitterOk && profileIgnored;
   if (!ok) {
     console.error("selftest FAILED");
     return 1;

@@ -19,16 +19,34 @@ export function isBlockedHost(uri: string, blocklist = config.pumpMetadataBlockl
 }
 
 export function extractWebsite(meta: unknown): string | null {
+  return metaString(meta, "website");
+}
+
+export function extractTwitter(meta: unknown): string | null {
+  return metaString(meta, "twitter");
+}
+
+function metaString(meta: unknown, key: string): string | null {
   if (!meta || typeof meta !== "object") return null;
   const m = meta as Record<string, unknown>;
-  const top = typeof m.website === "string" ? m.website.trim() : "";
+  const top = typeof m[key] === "string" ? (m[key] as string).trim() : "";
   if (top) return top;
   const ext = m.extensions;
   if (ext && typeof ext === "object") {
-    const w = (ext as Record<string, unknown>).website;
+    const w = (ext as Record<string, unknown>)[key];
     if (typeof w === "string" && w.trim()) return w.trim();
   }
   return null;
+}
+
+const STATUS_RE =
+  /https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\/(?:[\w.]+\/status|i\/web\/status|i\/status)\/(\d+)/i;
+
+/** Status-URL → tweet-id. Profil-länkar ger null. */
+export function parseStatusUrl(url: string): { id: string; url: string } | null {
+  const m = url.match(STATUS_RE);
+  if (!m) return null;
+  return { id: m[1], url: url.split("?")[0] };
 }
 
 export function parseGithubUrl(website: string): { owner: string; repo: string | null; url: string } | null {

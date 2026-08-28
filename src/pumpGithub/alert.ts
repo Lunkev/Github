@@ -4,16 +4,14 @@ import { postWebhook } from "../discord/webhook.js";
 import type { GithubCoinRow } from "./store.js";
 
 export function formatGithubCoinAlert(row: GithubCoinRow): string {
-  const stars = row.repo_stars == null ? "?" : `${row.repo_stars} stars`;
-  const age = row.repo_age_days == null ? "?" : `repo ${row.repo_age_days}d old`;
-  const lang = row.repo_language || (row.repo_missing ? "missing/private" : "—");
-  const path = row.github_repo ? `${row.github_owner}/${row.github_repo}` : row.github_owner;
-  return [
-    `$${row.symbol} — ${row.name}`,
-    `github.com/${path}  ·  ${stars}  ·  ${age}  ·  ${lang}`,
-    `website: ${row.website}`,
-    `https://pump.fun/${row.mint}`,
-  ].join("\n");
+  const ticker = row.symbol.trim().startsWith("$") ? row.symbol.trim() : `$${row.symbol.trim()}`;
+  const tweet = row.tweet_text?.trim();
+  const parts = ["🚨 GITHUB COIN FOUND 🚨", "", `${row.name} - ${ticker}`, ""];
+  if (tweet) {
+    parts.push(tweet, "");
+  }
+  parts.push(row.github_url, "", `https://axiom.trade/meme/${row.mint}`);
+  return parts.join("\n");
 }
 
 /** Dagtid: posta. Natt: true = köa. Tom webhook = logga. */

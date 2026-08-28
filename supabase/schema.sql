@@ -136,8 +136,13 @@ create table if not exists github_coins (
   found_at timestamptz not null default now(),
   source text not null check (source in ('live','backfill')),
   queued_for_morning boolean default false,
-  repo_missing boolean default false
+  repo_missing boolean default false,
+  twitter_url text,
+  tweet_text text
 );
+
+alter table github_coins add column if not exists twitter_url text;
+alter table github_coins add column if not exists tweet_text text;
 
 create index if not exists idx_github_coins_found on github_coins (found_at desc);
 create index if not exists idx_github_coins_queued on github_coins (queued_for_morning) where queued_for_morning = true;
