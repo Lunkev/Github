@@ -1,0 +1,28 @@
+name: github-scan
+on:
+  schedule:
+    - cron: "10 * * * *" # varje timme (UTC, minut 10 för att undvika rusning)
+  workflow_dispatch: {}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run github
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_MAYBE: ${{ secrets.DISCORD_WEBHOOK_MAYBE }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          CHANNEL_PROVEN_ID: ${{ secrets.CHANNEL_PROVEN_ID }}
+          CHANNEL_WATCHLIST_ID: ${{ secrets.CHANNEL_WATCHLIST_ID }}
+          # GH_API_TOKEN-secret om du skapat en egen; annars räcker Actions inbyggda token
+          GITHUB_API_TOKEN: ${{ secrets.GH_API_TOKEN || github.token }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
