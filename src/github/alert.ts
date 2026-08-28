@@ -15,19 +15,14 @@ export function isDaytime(now = new Date()): boolean {
   return hour >= config.alertHours.start && hour < config.alertHours.end;
 }
 
-function formatFinding(f: Finding): string {
-  const crowd =
-    f.crowdedness.matches === 0
-      ? "🟢 OLAUNCHAD"
-      : `🟡 ${f.crowdedness.matches} träffar, topp-volym $${Math.round(f.crowdedness.topVolume24h / 1000)}k`;
-  return [
-    `**${f.eggName} → ${f.tickerSuggestion}** · ${crowd}`,
-    `📍 \`${f.hit.repo}\` · ${f.hit.path}:${f.hit.lineNumber}`,
-    `> ${f.hit.line}`,
-    `🔗 ${f.hit.url}`,
-    `💡 ${f.reasoning}`,
-    `📝 Tweet-utkast:\n\`\`\`\n${f.tweetDraft}\n\`\`\``,
-  ].join("\n");
+function ticker(f: Finding): string {
+  const t = f.tickerSuggestion.trim();
+  return t.startsWith("$") ? t : `$${t}`;
+}
+
+function formatFinding(f: Finding, kind: "hot" | "maybe"): string {
+  const header = kind === "hot" ? "🚨 GEM FOUND 🚨" : "👀 GEM MAYBE 👀";
+  return [header, "", `${f.eggName} - ${ticker(f)}`, "", f.tweetDraft.trim(), "", f.hit.url].join("\n");
 }
 
 async function postWebhook(url: string, content: string): Promise<void> {
@@ -43,19 +38,19 @@ async function postWebhook(url: string, content: string): Promise<void> {
 /** Postar fynd till rätt kanal. Returnerar de fynd som INTE postades (natt) för DB-kö. */
 export async function sendAlerts(findings: Finding[]): Promise<Finding[]> {
   if (!hasKey.discord()) {
-    for (const f of findings) console.log("\n" + formatFinding(f));
+    for (const f of findings) console.log("\n" + formatFinding(f, f.verdict));
     return [];
   }
   const daytime = isDaytime();
   const queued: Finding[] = [];
   for (const f of findings) {
     if (f.verdict === "hot" && daytime) {
-      await postWebhook(config.discordWebhookUrl, `🚨 **GEM HITTAD**\n${formatFinding(f)}`);
+      await postWebhook(config.discordWebhookUrl, formatFinding(f, "hot"));
     } else if (f.verdict === "hot") {
       queued.push(f); // natt -> morgonbriefen
     } else {
       const url = config.discordWebhookMaybe || config.discordWebhookUrl;
-      await postWebhook(url, `🤔 Maybe:\n${formatFinding(f)}`);
+      await postWebhook(url, formatFinding(f, "maybe"));
     }
   }
   return queued;
@@ -64,9 +59,9 @@ export async function sendAlerts(findings: Finding[]): Promise<Finding[]> {
 /** Morgonbrief för köade nattfynd. */
 export async function sendMorningBrief(queued: Finding[]): Promise<void> {
   if (queued.length === 0 || !hasKey.discord()) return;
-  const body = queued.map(formatFinding).join("\n\n———\n\n");
+  const body = queued.map((f) => formatFinding(f, "hot")).join("\n\n———\n\n");
   await postWebhook(
     config.discordWebhookUrl,
-    `☀️ **Morgonbrief — ${queued.length} fynd från i natt (ingen har launchat dem än):**\n\n${body}`,
+    `☀️ ${queued.length} gem${queued.length === 1 ? "" : "s"} from last night — still unlaunched:\n\n${body}`,
   );
 }
