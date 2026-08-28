@@ -104,6 +104,10 @@ create table if not exists scan_state (
   updated_at timestamptz default now()
 );
 
+-- Fingerprint = repo|path|lower(egg_name). Unikt så samma gem inte alertas två gånger.
+alter table findings add column if not exists fingerprint text;
+create unique index if not exists idx_findings_fingerprint on findings (fingerprint);
+
 create index if not exists idx_findings_created on findings (created_at);
 create index if not exists idx_signals_ran_at on signals (ran_at);
 create index if not exists idx_narratives_ran_at on narratives (ran_at);

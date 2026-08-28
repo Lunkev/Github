@@ -1,7 +1,7 @@
 // GitHub-scannern — entrypoint. Körs varje timme av .github/workflows/github-scan.yml.
 //   npm run github          skarp körning
 //   npm run github -- --dry torrkörning: bara insamling + lexikonfilter, ingen AI/Discord/DB
-import { listOrgRepos } from "./github/api.js";
+import { listOrgRepos, getHeadCommit } from "./github/api.js";
 import { deepScan, diffScan, type RawHit } from "./github/scan.js";
 import { judgeHits } from "./github/judge.js";
 import { sendAlerts, sendMorningBrief, isDaytime } from "./github/alert.js";
@@ -13,11 +13,18 @@ import {
   setState,
   saveFindings,
   popQueuedFindings,
+  filterUnseenHits,
+  filterUnseenFindings,
 } from "./db/githubStore.js";
 import { getProvenPatterns } from "./db/supabase.js";
 
 const DRY = process.argv.includes("--dry");
 const MAX_DEEP_SCANS_PER_RUN = 2; // rate limit-hygien; resten tas nästa timme
+
+interface ScanTarget {
+  full: string; // owner/repo
+  isNewToOrg: boolean;
+}
 
 async function main() {
   console.log(`🔍 github-scan ${DRY ? "(torrkörning)" : ""} — ${new Date().toISOString()}\n`);
@@ -30,38 +37,65 @@ async function main() {
     if (proven) console.log(`#proven: ${proven} nya inskick strukturerade.`);
   }
 
-  // 2. Watchlist -> konkreta repos. Org-poster expanderas till orgens repos
-  //    (att lägga till en org = ok att skanna dess repos; nya repos flaggas i loggen).
+  // 2. Watchlist -> konkreta repos. Org-poster expanderas; nya repos i org prioriteras för djupscan.
   const watchlist = await getWatchlist();
   const learnedTerms = DRY ? [] : await getLearnedTerms();
-  const repos: string[] = [];
+  const targets: ScanTarget[] = [];
+  const orgSeenUpdates: { key: string; repos: string[] }[] = [];
+
   for (const entry of watchlist) {
     if (entry.target.includes("/")) {
-      repos.push(entry.target);
-    } else {
-      const orgRepos = await listOrgRepos(entry.target);
-      repos.push(...orgRepos.slice(0, 15).map((r) => `${entry.target}/${r.name}`));
+      targets.push({ full: entry.target, isNewToOrg: false });
+      continue;
     }
+    const orgRepos = await listOrgRepos(entry.target);
+    const current = orgRepos.slice(0, 15).map((r) => `${entry.target}/${r.name}`);
+    const seenKey = `seen_repos_${entry.target}`;
+    const seenRaw = DRY ? null : await getState(seenKey);
+    let seen: string[] = [];
+    if (seenRaw) {
+      try {
+        seen = JSON.parse(seenRaw) as string[];
+      } catch {
+        seen = [];
+      }
+    }
+    const seenSet = new Set(seen);
+    // Första snapshot: alla är baslinje, inte "nya". Därefter är diff mot sedda = nya repos.
+    for (const full of current) {
+      targets.push({ full, isNewToOrg: seen.length > 0 && !seenSet.has(full) });
+    }
+    if (!DRY) orgSeenUpdates.push({ key: seenKey, repos: current });
   }
-  console.log(`Bevakar ${repos.length} repos (${learnedTerms.length} inlärda lexikon-termer).\n`);
 
-  // 3. Skanna: djupscan för nya repos (max N per körning), diff-vakt för resten.
-  const lastRun = (await getState("last_github_run")) ?? new Date(Date.now() - 24 * 3600_000).toISOString();
+  targets.sort((a, b) => Number(b.isNewToOrg) - Number(a.isNewToOrg));
+  console.log(`Bevakar ${targets.length} repos (${learnedTerms.length} inlärda lexikon-termer).\n`);
+
+  // 3. Skanna: djupscan för nya/oskannade repos (max N per körning), SHA-diff för resten.
   const allHits: RawHit[] = [];
   let deepScansUsed = 0;
-  for (const repoFull of repos) {
-    const [owner, repo] = repoFull.split("/");
-    const deepKey = `deep_scanned_${repoFull}`;
+  for (const t of targets) {
+    const [owner, repo] = t.full.split("/");
+    const ref = { owner, repo };
+    const deepKey = `deep_scanned_${t.full}`;
+    const shaKey = `last_sha_${t.full}`;
     const alreadyDeep = DRY ? true : (await getState(deepKey)) !== null;
     if (!alreadyDeep && deepScansUsed < MAX_DEEP_SCANS_PER_RUN) {
-      console.log(`  djupscan: ${repoFull} ...`);
-      allHits.push(...(await deepScan({ owner, repo }, learnedTerms)));
+      console.log(`  djupscan: ${t.full}${t.isNewToOrg ? " (nytt i org)" : ""} ...`);
+      allHits.push(...(await deepScan(ref, learnedTerms)));
       await setState(deepKey, new Date().toISOString());
+      const head = await getHeadCommit(ref);
+      if (head) await setState(shaKey, head.sha);
       deepScansUsed++;
     } else {
-      allHits.push(...(await diffScan({ owner, repo }, lastRun, learnedTerms)));
+      if (t.isNewToOrg) console.log(`  nytt repo i org (diff tills djupscan-slot): ${t.full}`);
+      const lastSha = DRY ? null : await getState(shaKey);
+      const { hits, headSha } = await diffScan(ref, learnedTerms, lastSha);
+      allHits.push(...hits);
+      if (!DRY && headSha) await setState(shaKey, headSha);
     }
   }
+  for (const u of orgSeenUpdates) await setState(u.key, JSON.stringify(u.repos));
   console.log(`Råträffar från lexikonfiltret: ${allHits.length}`);
 
   if (DRY) {
@@ -71,11 +105,18 @@ async function main() {
     return;
   }
 
-  // 4. Claude bedömer, DexScreener-kollar, alerts går ut (natt-hot köas).
-  const findings = await judgeHits(allHits, await getProvenPatterns());
-  console.log(`Fynd efter bedömning: ${findings.length}`);
-  const queued = await sendAlerts(findings);
+  // 4. Hoppa redan sedda rader → Claude → fingerprint-dedup → spara → alert (tyst om tomt).
+  const freshHits = await filterUnseenHits(allHits);
+  if (freshHits.length < allHits.length) {
+    console.log(`Hoppar ${allHits.length - freshHits.length} redan sparade rader före bedömning.`);
+  }
+  const judged = await judgeHits(freshHits, await getProvenPatterns());
+  const findings = await filterUnseenFindings(judged);
+  console.log(`Fynd efter bedömning: ${judged.length} (nya: ${findings.length})`);
+
+  const queued = isDaytime() ? [] : findings.filter((f) => f.verdict === "hot");
   await saveFindings(findings, queued);
+  await sendAlerts(findings);
 
   // 5. Morgonbrief: första dagtidskörningen tömmer nattkön.
   if (isDaytime()) {

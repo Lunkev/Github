@@ -1,4 +1,13 @@
-import { getTree, getFileContent, listCommitsSince, getCommitDiff, permalink, type RepoRef } from "./api.js";
+import {
+  getTree,
+  getFileContent,
+  listCommitsSince,
+  listRecentCommits,
+  getCommitDiff,
+  permalink,
+  type RepoRef,
+  type CommitRef,
+} from "./api.js";
 import { matchLexicon, isInterestingFile, type LexiconHit } from "./lexicon.js";
 
 // Producerar RÅTRÄFFAR (lexikon-matchningar med kontext) — bedömningen sker i judge.ts.
@@ -32,11 +41,32 @@ export async function deepScan(ref: RepoRef, extraTerms: string[]): Promise<RawH
   return hits;
 }
 
-/** Diff-vakt: bara det som ändrats sedan senaste körningen. */
-export async function diffScan(ref: RepoRef, sinceIso: string, extraTerms: string[]): Promise<RawHit[]> {
-  const commits = await listCommitsSince(ref, sinceIso);
+/** Commits nyare än lastSha (lastSha själv hoppas över). Nyast först. */
+function commitsNewerThan(commits: CommitRef[], lastSha: string | null): CommitRef[] {
+  if (!lastSha) return commits;
+  const idx = commits.findIndex((c) => c.sha === lastSha);
+  if (idx === -1) return commits;
+  return commits.slice(0, idx);
+}
+
+export interface DiffScanResult {
+  hits: RawHit[];
+  headSha: string | null;
+}
+
+/** Diff-vakt: bara commits nyare än lastSha (fallback: senaste 24h). */
+export async function diffScan(
+  ref: RepoRef,
+  extraTerms: string[],
+  lastSha: string | null,
+): Promise<DiffScanResult> {
+  const recent = lastSha
+    ? await listRecentCommits(ref, 50)
+    : await listCommitsSince(ref, new Date(Date.now() - 24 * 3600_000).toISOString());
+  const headSha = recent[0]?.sha ?? lastSha;
+  const commits = commitsNewerThan(recent, lastSha).slice(0, 20);
   const hits: RawHit[] = [];
-  for (const commit of commits.slice(0, 20)) {
+  for (const commit of commits) {
     // commit-meddelandet i sig kan innehålla guld
     for (const h of matchLexicon(commit.message, extraTerms)) {
       hits.push({
@@ -65,5 +95,5 @@ export async function diffScan(ref: RepoRef, sinceIso: string, extraTerms: strin
       }
     }
   }
-  return hits;
+  return { hits, headSha };
 }

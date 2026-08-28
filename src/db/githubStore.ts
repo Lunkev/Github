@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { config, hasKey } from "../config.js";
 import type { Finding } from "../github/judge.js";
+import type { RawHit } from "../github/scan.js";
 
 // All state för GitHub-scannern. Utan Supabase körs allt i "statelöst läge":
 // fallback-watchlist + diff-fönster = senaste 24h. Funkar för test, DB krävs för skarp drift.
@@ -66,12 +67,51 @@ export async function setState(key: string, value: string): Promise<void> {
   await db()?.from("scan_state").upsert({ key, value }, { onConflict: "key" });
 }
 
-/** Spara fynd; queued=true betyder nattfynd som väntar på morgonbriefen. */
+export function findingFingerprint(repo: string, path: string, eggName: string): string {
+  return `${repo}|${path}|${eggName.trim().toLowerCase()}`;
+}
+
+function hitKey(repo: string, path: string, line: string): string {
+  return `${repo}|${path}|${line.toLowerCase().trim()}`;
+}
+
+/** Råträffar vars exakta rad redan finns som fynd — hoppa Claude. Ny rad i samma fil går vidare. */
+export async function filterUnseenHits(hits: RawHit[]): Promise<RawHit[]> {
+  const d = db();
+  if (!d || hits.length === 0) return hits;
+  const { data, error } = await d.from("findings").select("repo, path, excerpt");
+  if (error) {
+    console.error("filterUnseenHits:", error.message);
+    return hits;
+  }
+  if (!data?.length) return hits;
+  const seen = new Set(data.map((r) => hitKey(r.repo, r.path ?? "", r.excerpt ?? "")));
+  return hits.filter((h) => !seen.has(hitKey(h.repo, h.path, h.line)));
+}
+
+/** Fynd som redan skickats (samma repo+path+egg) filtreras bort. */
+export async function filterUnseenFindings(findings: Finding[]): Promise<Finding[]> {
+  if (findings.length === 0) return [];
+  const d = db();
+  if (!d) return findings;
+  const { data, error } = await d.from("findings").select("repo, path, egg_name, fingerprint");
+  if (error) {
+    console.error("filterUnseenFindings:", error.message);
+    return findings;
+  }
+  if (!data?.length) return findings;
+  const seen = new Set(
+    data.map((r) => r.fingerprint || findingFingerprint(r.repo, r.path ?? "", r.egg_name ?? "")),
+  );
+  return findings.filter((f) => !seen.has(findingFingerprint(f.hit.repo, f.hit.path, f.eggName)));
+}
+
+/** Spara fynd (upsert på fingerprint). queued=true = nattfynd till morgonbriefen. */
 export async function saveFindings(findings: Finding[], queued: Finding[]): Promise<void> {
   const d = db();
   if (!d || findings.length === 0) return;
   const queuedSet = new Set(queued);
-  await d.from("findings").insert(
+  const { error } = await d.from("findings").upsert(
     findings.map((f) => ({
       repo: f.hit.repo,
       path: f.hit.path,
@@ -85,8 +125,11 @@ export async function saveFindings(findings: Finding[], queued: Finding[]): Prom
       verdict: f.verdict,
       crowdedness_matches: f.crowdedness.matches,
       queued_for_morning: queuedSet.has(f),
+      fingerprint: findingFingerprint(f.hit.repo, f.hit.path, f.eggName),
     })),
+    { onConflict: "fingerprint", ignoreDuplicates: true },
   );
+  if (error) console.error("findings upsert:", error.message);
 }
 
 /** Hämta + rensa nattkön (körs av första körningen efter kl 07). */

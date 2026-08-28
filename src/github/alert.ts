@@ -37,6 +37,7 @@ async function postWebhook(url: string, content: string): Promise<void> {
 
 /** Postar fynd till rätt kanal. Returnerar de fynd som INTE postades (natt) för DB-kö. */
 export async function sendAlerts(findings: Finding[]): Promise<Finding[]> {
+  if (findings.length === 0) return [];
   if (!hasKey.discord()) {
     for (const f of findings) console.log("\n" + formatFinding(f, f.verdict));
     return [];
