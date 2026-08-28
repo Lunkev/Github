@@ -49,5 +49,13 @@ Allt nedan gör du EN gång. Totalt ~30–45 min. Sen sköter systemet sig själ
 ## 8. Pump.fun GitHub-länkar (motsatt scanner)
 - [ ] Skapa kanal `#github-coins` (inte gems) → webhook → `DISCORD_WEBHOOK_PUMP_GITHUB` i `.env`
 - [ ] SQL: kör `github_coins`-tabellen i `supabase/schema.sql` om du inte körde hela filen på nytt
-- [ ] `npm run pump-github -- --selftest` sedan `npm run pump-github` (måste vara igång för att fånga launches)
-- [ ] För dygnet runt: Railway/Fly/PC — **inte** GitHub Actions eller Vercel
+- [ ] `npm run pump-github -- --selftest` sedan `npm run pump-github` (lokalt test; måste vara igång för att fånga launches)
+- [ ] För dygnet runt: **Railway** (~$5/mån Hobby) — **inte** GitHub Actions eller Vercel
+  1. [railway.app](https://railway.app) → Hobby-plan → logga in med GitHub
+  2. New Project → Deploy from GitHub repo → `Lunkev/Github` → branch `main`
+  3. En service, ingen databas. Generera ingen public domain
+  4. Variables (samma värden som i `.env`): `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` (service_role), `DISCORD_WEBHOOK_PUMP_GITHUB`, `GITHUB_TOKEN`, ev. `TWITTERAPI_IO_KEY`
+  5. Settings → Serverless / App Sleeping **av**. Replicas = 1
+  6. Logs ska visa `pump-github live` och `Prenumererar på nya tokens.`
+  7. Stoppa den lokala processen (Ctrl+C) — annars kör två klienter
+  8. PC kan stängas av. Push till `main` redeployar automatiskt

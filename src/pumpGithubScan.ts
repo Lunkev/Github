@@ -61,10 +61,12 @@ async function main(): Promise<void> {
 
   console.log("pump-github live — Ctrl+C för att stoppa\n");
   let stopped = false;
-  process.on("SIGINT", () => {
+  const stop = () => {
     stopped = true;
     process.exit(0);
-  });
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
   connectLive(() => stopped);
 }
 
