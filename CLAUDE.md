@@ -1,7 +1,7 @@
 # narrative-scanner — kontext för AI-assistenten (Cursor)
 
-**NUVARANDE FOKUS: GitHub-scannern. Läs PLAN-GITHUB.md först** — det är den aktiva specen.
-PLAN.md beskriver det större systemet (bred narrativ-scanning) som är PAUSAT tills GitHub-delen sitter.
+**NUVARANDE FOKUS: GitHub-scannern + News Watch Scanner. Läs PLAN-GITHUB.md först för GitHub-delen.**
+PLAN.md beskriver det större systemet (bred narrativ-scanning), som fortfarande är pausat. Den separata News Watch Scanner kör endast användarstyrda Google News-sökningar.
 STARTA-HAR.md är ägarens manuella setup-checklista.
 
 ## Vad projektet är
@@ -14,6 +14,9 @@ Proaktiv narrativ-scanner för en Solana-memecoin-deployer. Samlar signaler (nyh
 - Ingen server: körs som cron via GitHub Actions (`.github/workflows/daily.yml`). Secrets ligger i repo-settings.
 - Kostnadsdisciplin: gratis-källor först, betalanrop (twitterapi.io, Apify, Claude) hålls till 2–3 körningar/dag.
 - `npm run scan -- --dry` = torrkörning utan nycklar/DB/Discord. Ska alltid fungera.
+
+## News Watch Scanner
+`src/newsScan.ts` läser `#news-watchlist` (`add`, `remove`, `list`, `analyze`), söker engelska USA/globala artiklar via Google News RSS, deduplicerar i `news_articles`, bedömer högst 15 nya artiklar med Claude Sonnet och postar högst fem fynd med score 65+ till den separata webhooken `DISCORD_WEBHOOK_NEWS`. Körs varje timme av `.github/workflows/daily.yml`. Den får aldrig falla tillbaka till gems-webhooken.
 
 ## GitHub-scannern (aktivt arbete)
 Flöde: `src/githubScan.ts` → Discord-inläsning (`src/discord/ingest.ts`: #watchlist + #proven) → watchlist expanderas → djupscan/diff-vakt (`src/github/scan.ts`) → lexikonfilter (`src/github/lexicon.ts`) → Claude-bedömning + DexScreener-koll (`src/github/judge.ts`) → alerts (`src/github/alert.ts`, hot/maybe, dagtid 07–23 Europe/Stockholm, nattfynd köas till morgonbrief). State + fynd i Supabase (`src/db/githubStore.ts`).

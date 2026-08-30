@@ -146,3 +146,37 @@ alter table github_coins add column if not exists tweet_text text;
 
 create index if not exists idx_github_coins_found on github_coins (found_at desc);
 create index if not exists idx_github_coins_queued on github_coins (queued_for_morning) where queued_for_morning = true;
+
+-- ===== News Watch Scanner =====
+
+-- Google News-sökningar som styrs via #news-watchlist.
+create table if not exists news_topics (
+  id bigint generated always as identity primary key,
+  query text not null unique,
+  active boolean not null default true,
+  added_by text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- Artiklar sparas före Claude-anropet så samma artikel aldrig analyseras/pingas igen.
+create table if not exists news_articles (
+  fingerprint text primary key,
+  title text not null,
+  source_name text,
+  url text not null,
+  published_at timestamptz,
+  summary text,
+  article_excerpt text,
+  matched_topics jsonb not null default '[]'::jsonb,
+  status text not null default 'pending'
+    check (status in ('pending','analyzed','skipped','alerted','error')),
+  score int,
+  candidate jsonb,
+  analyzed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_news_topics_active on news_topics (active);
+create index if not exists idx_news_articles_created on news_articles (created_at desc);
+create index if not exists idx_news_articles_status on news_articles (status);

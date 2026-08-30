@@ -59,3 +59,20 @@ Allt nedan gör du EN gång. Totalt ~30–45 min. Sen sköter systemet sig själ
   6. Logs ska visa `pump-github live` och `Prenumererar på nya tokens.`
   7. Stoppa den lokala processen (Ctrl+C) — annars kör två klienter
   8. PC kan stängas av. Push till `main` redeployar automatiskt
+
+## 9. News Watch Scanner (Google News → #news-plays)
+- [ ] Skapa textkanalerna `#news-watchlist` och `#news-plays`
+- [ ] `#news-plays` → Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL
+  - Spara som `DISCORD_WEBHOOK_NEWS` lokalt och som GitHub Actions-secret
+- [ ] Ge den befintliga boten rättigheterna View Channel, Read Message History och Send Messages i `#news-watchlist`
+- [ ] Discord User Settings → Advanced → Developer Mode → högerklicka `#news-watchlist` → Copy Channel ID
+  - Spara som `CHANNEL_NEWS_WATCHLIST_ID` lokalt och som GitHub Actions-secret
+- [ ] Supabase SQL Editor → kör sektionen `News Watch Scanner` från `supabase/schema.sql`
+- [ ] GitHub → Settings → Secrets and variables → Actions → lägg till:
+  - `DISCORD_WEBHOOK_NEWS`
+  - `CHANNEL_NEWS_WATCHLIST_ID`
+  - Befintliga `DISCORD_BOT_TOKEN`, `ANTHROPIC_API_KEY`, `SUPABASE_URL` och `SUPABASE_SERVICE_KEY` återanvänds
+- [ ] GitHub → Actions → `news-scan` → Run workflow
+- [ ] Skriv ämnen i `#news-watchlist`: `add Elon Musk`, `add AI robots`, `add weird animal news`
+- [ ] Kommandon: `list`, `remove <ämne>`, `analyze https://...`
+- [ ] Kör workflowet manuellt en gång till. Därefter kör det varje timme och postar högst fem fynd med score 65+.

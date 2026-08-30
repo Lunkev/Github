@@ -1,13 +1,12 @@
-name: narrative-scan
+name: news-scan
 on:
   schedule:
-    # UTC! 05:00 UTC = 07:00 svensk sommartid (morgonbrief),
-    # 11:00 + 17:00 UTC = lunch- och kvällsskanning.
-    - cron: "0 5,11,17 * * *"
+    # Varje timme, minut 17 för att undvika GitHub Actions rusning vid hel timme.
+    - cron: "17 * * * *"
   workflow_dispatch: {} # manuell körning från Actions-fliken
 
 jobs:
-  scan:
+  news:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -16,11 +15,11 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - run: npm run scan
+      - run: npm run news
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          TWITTERAPI_IO_KEY: ${{ secrets.TWITTERAPI_IO_KEY }}
+          DISCORD_WEBHOOK_NEWS: ${{ secrets.DISCORD_WEBHOOK_NEWS }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          CHANNEL_NEWS_WATCHLIST_ID: ${{ secrets.CHANNEL_NEWS_WATCHLIST_ID }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
