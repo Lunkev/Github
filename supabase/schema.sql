@@ -119,6 +119,189 @@ create index if not exists idx_signals_ran_at on signals (ran_at);
 create index if not exists idx_narratives_ran_at on narratives (ran_at);
 create index if not exists idx_proven_category on proven_coins (category);
 
+-- Förlustfri GitHub-kö: discovery-cursorn flyttas först när commits/filer är
+-- varaktigt köade. Arbete som avbryts av timeout eller budget ligger kvar.
+create table if not exists github_repo_state (
+  repo text primary key,
+  last_discovered_sha text,
+  baseline_sha text,
+  baseline_complete boolean not null default false,
+  last_error text,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists github_scan_units (
+  fingerprint text primary key,
+  repo text not null,
+  kind text not null check (kind in ('commit','commit_file','deep_file','text_chunk')),
+  commit_sha text not null,
+  parent_sha text,
+  path text,
+  blob_sha text,
+  payload jsonb not null default '{}'::jsonb,
+  status text not null default 'pending'
+    check (status in ('pending','processing','done','error','audit')),
+  attempt_count int not null default 0,
+  next_attempt_at timestamptz not null default now(),
+  locked_at timestamptz,
+  last_error text,
+  github_api_calls int not null default 0,
+  chunk_count int not null default 0,
+  processed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+alter table github_scan_units drop constraint if exists github_scan_units_kind_check;
+alter table github_scan_units add constraint github_scan_units_kind_check
+  check (kind in ('commit','commit_file','deep_file','text_chunk'));
+
+create index if not exists idx_github_scan_units_ready
+  on github_scan_units (status, next_attempt_at, created_at);
+create index if not exists idx_github_scan_units_repo
+  on github_scan_units (repo, created_at);
+
+-- Råkandidater sparas innan Sonnet så parsefel, timeout och budget aldrig
+-- kan radera ett potentiellt fynd.
+create table if not exists github_candidates (
+  fingerprint text primary key,
+  unit_fingerprint text not null references github_scan_units(fingerprint) on delete cascade,
+  repo text not null,
+  path text not null,
+  commit_sha text,
+  line_number int not null default 1,
+  excerpt text not null,
+  context text not null,
+  term text not null,
+  url text not null,
+  mode text not null check (mode in ('deep','diff')),
+  source text not null check (source in ('rule','haiku')),
+  commit_message text,
+  status text not null default 'pending'
+    check (status in ('pending','processing','judged','error','audit')),
+  attempt_count int not null default 0,
+  locked_at timestamptz,
+  last_error text,
+  created_at timestamptz not null default now(),
+  judged_at timestamptz
+);
+
+alter table github_candidates drop constraint if exists github_candidates_status_check;
+alter table github_candidates add constraint github_candidates_status_check
+  check (status in ('pending','processing','judged','error','audit'));
+
+create index if not exists idx_github_candidates_ready
+  on github_candidates (status, created_at);
+
+create table if not exists github_scan_runs (
+  id bigint generated always as identity primary key,
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  dry_run boolean not null default false,
+  repos_touched int not null default 0,
+  units_enqueued int not null default 0,
+  units_processed int not null default 0,
+  github_api_calls int not null default 0,
+  claude_haiku_input_tokens bigint not null default 0,
+  claude_haiku_output_tokens bigint not null default 0,
+  claude_sonnet_input_tokens bigint not null default 0,
+  claude_sonnet_output_tokens bigint not null default 0,
+  findings_new int not null default 0,
+  estimated_cost_usd numeric not null default 0,
+  backlog_remaining int not null default 0,
+  error text
+);
+
+create index if not exists idx_github_scan_runs_started
+  on github_scan_runs (started_at desc);
+
+-- Atomisk claim. En avbruten worker återtas efter 30 minuter.
+create or replace function claim_github_scan_units(p_limit int default 20)
+returns setof github_scan_units
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update github_scan_units
+  set status = 'audit',
+      locked_at = null,
+      processed_at = now(),
+      last_error = coalesce(last_error, 'Retrygräns nådd')
+  where attempt_count >= 8
+    and (
+      status in ('pending','error')
+      or (status = 'processing' and locked_at < now() - interval '30 minutes')
+    );
+
+  return query
+  with claimed as materialized (
+    select u.fingerprint
+    from github_scan_units u
+    where (
+      (u.status in ('pending','error') and u.next_attempt_at <= now())
+      or (u.status = 'processing' and u.locked_at < now() - interval '30 minutes')
+    )
+    and u.attempt_count < 8
+    order by u.created_at
+    limit greatest(p_limit, 0)
+    for update skip locked
+  )
+  update github_scan_units u
+  set status = 'processing',
+      locked_at = now(),
+      attempt_count = u.attempt_count + 1
+  from claimed
+  where u.fingerprint = claimed.fingerprint
+  returning u.*;
+end;
+$$;
+
+revoke all on function claim_github_scan_units(int) from public;
+grant execute on function claim_github_scan_units(int) to service_role;
+
+create or replace function claim_github_candidates(p_limit int default 60)
+returns setof github_candidates
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update github_candidates
+  set status = 'audit',
+      locked_at = null,
+      last_error = coalesce(last_error, 'Retrygräns nådd')
+  where attempt_count >= 8
+    and (
+      status in ('pending','error')
+      or (status = 'processing' and locked_at < now() - interval '30 minutes')
+    );
+
+  return query
+  with claimed as materialized (
+    select c.fingerprint
+    from github_candidates c
+    where (
+      c.status in ('pending','error')
+      or (c.status = 'processing' and c.locked_at < now() - interval '30 minutes')
+    )
+    and c.attempt_count < 8
+    order by c.created_at
+    limit greatest(p_limit, 0)
+    for update skip locked
+  )
+  update github_candidates c
+  set status = 'processing',
+      locked_at = now(),
+      attempt_count = c.attempt_count + 1
+  from claimed
+  where c.fingerprint = claimed.fingerprint
+  returning c.*;
+end;
+$$;
+
+revoke all on function claim_github_candidates(int) from public;
+grant execute on function claim_github_candidates(int) to service_role;
+
 -- Pump.fun coins vars website pekar på GitHub (live-scannern).
 create table if not exists github_coins (
   mint text primary key,

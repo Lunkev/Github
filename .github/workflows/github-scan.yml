@@ -4,16 +4,23 @@ on:
     - cron: "10 * * * *" # varje timme (UTC, minut 10 för att undvika rusning)
   workflow_dispatch: {}
 
+concurrency:
+  group: github-scan
+  cancel-in-progress: false
+
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
       - run: npm ci
+      - run: npm run typecheck
+      - run: npm run github:selftest
       - run: npm run github
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -26,3 +33,5 @@ jobs:
           GITHUB_API_TOKEN: ${{ secrets.GH_API_TOKEN || github.token }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GITHUB_CLAUDE_MONTHLY_BUDGET_USD: "65"
+          GITHUB_RUN_DEADLINE_MINUTES: "22"

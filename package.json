@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "github": "tsx src/githubScan.ts",
+    "github:selftest": "tsx src/githubScan.ts --selftest",
     "pump-github": "tsx src/pumpGithubScan.ts",
     "news": "tsx src/newsScan.ts",
     "scan": "tsx src/index.ts",

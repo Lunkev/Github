@@ -23,37 +23,68 @@ function ticker(f: Finding): string {
 
 function formatFinding(f: Finding, kind: "hot" | "maybe"): string {
   const header = kind === "hot" ? "🚨 GEM FOUND 🚨" : "👀 GEM MAYBE 👀";
-  return [header, "", `${f.eggName} - ${ticker(f)}`, "", f.tweetDraft.trim(), "", f.hit.url].join("\n");
+  return [
+    header,
+    "",
+    `${f.eggName.slice(0, 200)} - ${ticker(f).slice(0, 50)}`,
+    "",
+    f.tweetDraft.trim().slice(0, 1000),
+    "",
+    f.hit.url.slice(0, 500),
+  ].join("\n");
 }
 
 /** Postar fynd till rätt kanal. Returnerar de fynd som INTE postades (natt) för DB-kö. */
-export async function sendAlerts(findings: Finding[]): Promise<Finding[]> {
+export async function sendAlerts(findings: Finding[], daytime = isDaytime()): Promise<Finding[]> {
   if (findings.length === 0) return [];
   if (!hasKey.discord()) {
-    for (const f of findings) console.log("\n" + formatFinding(f, f.verdict));
-    return [];
+    throw new Error("DISCORD_WEBHOOK_URL saknas; fynden lämnas okvitterade för retry.");
   }
-  const daytime = isDaytime();
   const queued: Finding[] = [];
   for (const f of findings) {
     if (f.verdict === "hot" && daytime) {
-      await postWebhook(config.discordWebhookUrl, formatFinding(f, "hot"));
+      if (!(await postWebhook(config.discordWebhookUrl, formatFinding(f, "hot")))) {
+        throw new Error(`Discord kunde inte leverera hot-fyndet ${f.eggName}`);
+      }
     } else if (f.verdict === "hot") {
       queued.push(f); // natt -> morgonbriefen
     } else {
       const url = config.discordWebhookMaybe || config.discordWebhookUrl;
-      await postWebhook(url, formatFinding(f, "maybe"));
+      if (!(await postWebhook(url, formatFinding(f, "maybe")))) {
+        throw new Error(`Discord kunde inte leverera maybe-fyndet ${f.eggName}`);
+      }
     }
   }
   return queued;
 }
 
 /** Morgonbrief för köade nattfynd. */
-export async function sendMorningBrief(queued: Finding[]): Promise<void> {
-  if (queued.length === 0 || !hasKey.discord()) return;
-  const body = queued.map((f) => formatFinding(f, "hot")).join("\n\n———\n\n");
-  await postWebhook(
-    config.discordWebhookUrl,
-    `☀️ ${queued.length} gem${queued.length === 1 ? "" : "s"} from last night — still unlaunched:\n\n${body}`,
-  );
+export async function sendMorningBrief(
+  queued: Finding[],
+): Promise<{ sent: Finding[]; failed: Finding[] }> {
+  if (queued.length === 0) return { sent: [], failed: [] };
+  if (!hasKey.discord()) return { sent: [], failed: queued };
+  const sent: Finding[] = [];
+  const failed: Finding[] = [];
+  // Ett fynd per webhook gör att Discord-gränsen aldrig trunkerar flera fynd,
+  // och DB kan kvittera exakt de meddelanden som faktiskt levererades.
+  for (let index = 0; index < queued.length; index++) {
+    const body =
+      `☀️ Night gem ${index + 1}/${queued.length} — still unlaunched:\n\n` +
+      formatFinding(queued[index], "hot");
+    if (await postWebhook(config.discordWebhookUrl, body)) sent.push(queued[index]);
+    else failed.push(queued[index]);
+  }
+  return { sent, failed };
+}
+
+/** Driftfel går till maybe-kanalen så dataluckor aldrig blir tysta. */
+export async function sendOperationalAlert(message: string): Promise<void> {
+  const body = `GITHUB SCANNER — DRIFTVARNING\n\n${message.slice(0, 1800)}`;
+  const url = config.discordWebhookMaybe || config.discordWebhookUrl;
+  if (!url) {
+    console.error(body);
+    return;
+  }
+  await postWebhook(url, body);
 }

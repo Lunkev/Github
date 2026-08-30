@@ -101,6 +101,17 @@ export function findingFingerprint(repo: string, path: string, eggName: string):
   return `${repo}|${path}|${eggName.trim().toLowerCase()}`;
 }
 
+function stableFindingFingerprint(finding: Finding): string {
+  if (finding.hit.candidateFingerprint) return `candidate|${finding.hit.candidateFingerprint}`;
+  return [
+    finding.hit.repo,
+    finding.hit.path,
+    finding.hit.commitSha ?? "baseline",
+    finding.hit.lineNumber,
+    finding.hit.line.toLowerCase().replace(/\s+/g, " ").trim(),
+  ].join("|");
+}
+
 function hitKey(repo: string, path: string, line: string): string {
   return `${repo}|${path}|${line.toLowerCase().trim()}`;
 }
@@ -133,7 +144,10 @@ export async function filterUnseenFindings(findings: Finding[]): Promise<Finding
   const seen = new Set(
     data.map((r) => r.fingerprint || findingFingerprint(r.repo, r.path ?? "", r.egg_name ?? "")),
   );
-  return findings.filter((f) => !seen.has(findingFingerprint(f.hit.repo, f.hit.path, f.eggName)));
+  return findings.filter((f) => {
+    const oldFingerprint = findingFingerprint(f.hit.repo, f.hit.path, f.eggName);
+    return !seen.has(stableFindingFingerprint(f)) && !seen.has(oldFingerprint);
+  });
 }
 
 /** Spara fynd (upsert på fingerprint). queued=true = nattfynd till morgonbriefen. */
@@ -155,26 +169,27 @@ export async function saveFindings(findings: Finding[], queued: Finding[]): Prom
       verdict: f.verdict,
       crowdedness_matches: f.crowdedness.matches,
       queued_for_morning: queuedSet.has(f),
-      fingerprint: findingFingerprint(f.hit.repo, f.hit.path, f.eggName),
+      fingerprint: stableFindingFingerprint(f),
     })),
     { onConflict: "fingerprint", ignoreDuplicates: true },
   );
-  if (error) console.error("findings upsert:", error.message);
+  if (error) throw new Error(`findings upsert: ${error.message}`);
 }
 
-/** Hämta + rensa nattkön (körs av första körningen efter kl 07). */
+/** Hämta nattkön. Den kvitteras först efter bekräftad Discord-leverans. */
 export async function popQueuedFindings(): Promise<Finding[]> {
   const d = db();
   if (!d) return [];
   const { data } = await d.from("findings").select("*").eq("queued_for_morning", true);
   if (!data || data.length === 0) return [];
-  await d.from("findings").update({ queued_for_morning: false }).eq("queued_for_morning", true);
   return data.map((r) => ({
+    dbId: r.id,
     hit: {
       repo: r.repo,
       path: r.path,
       lineNumber: r.line_number,
       line: r.excerpt,
+      context: r.excerpt ?? "",
       url: r.url,
       term: "",
       mode: "diff" as const,
@@ -186,4 +201,12 @@ export async function popQueuedFindings(): Promise<Finding[]> {
     reasoning: r.reasoning,
     crowdedness: { matches: r.crowdedness_matches ?? 0, topVolume24h: 0 },
   }));
+}
+
+export async function clearQueuedFindings(findings: Finding[]): Promise<void> {
+  const ids = findings.flatMap((finding) => (finding.dbId ? [finding.dbId] : []));
+  if (ids.length === 0) return;
+  const { error } =
+    (await db()?.from("findings").update({ queued_for_morning: false }).in("id", ids)) ?? {};
+  if (error) throw new Error(`clearQueuedFindings: ${error.message}`);
 }

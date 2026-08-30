@@ -1,5 +1,10 @@
 import "dotenv/config";
 
+function positiveNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export const config = {
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
   discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL ?? "",
@@ -38,6 +43,12 @@ export const config = {
   briefThreshold: 60,
   /** Score-tröskel för intradag-alert (v2). */
   alertThreshold: 85,
+
+  /** GitHub-scannerns AI-del får använda högst $65; ~$10 lämnas till Actions inom totalmålet $75. */
+  githubClaudeMonthlyBudgetUsd: positiveNumber(process.env.GITHUB_CLAUDE_MONTHLY_BUDGET_USD, 65),
+  githubMaxUnitsPerRun: Math.floor(positiveNumber(process.env.GITHUB_MAX_UNITS_PER_RUN, 20)),
+  githubMaxCandidatesPerRun: Math.floor(positiveNumber(process.env.GITHUB_MAX_CANDIDATES_PER_RUN, 60)),
+  githubRunDeadlineMinutes: positiveNumber(process.env.GITHUB_RUN_DEADLINE_MINUTES, 22),
 };
 
 export const hasKey = {

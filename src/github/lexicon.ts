@@ -24,12 +24,15 @@ export const SEED_TERMS: string[] = [
 export const SEED_PATTERNS: RegExp[] = [
   /\$[A-Z]{2,8}\b/g, // $MYC, $KODA ...
   /"(?:name|symbol|ticker)"\s*:\s*"([^"]{2,30})"/gi, // metadata-exempel i JSON
+  /\b(?:code\s*name|codename|mascot|project\s*name)\s*[:=]\s*["'`]([^"'`]{2,60})["'`]/gi,
+  /\b(?:name|symbol|ticker)\s*[:=]\s*["'`]([^"'`]{2,40})["'`]/gi,
 ];
 
 export interface LexiconHit {
   term: string;
   line: string;
   lineNumber: number;
+  context: string;
 }
 
 function containsTerm(line: string, term: string): boolean {
@@ -40,17 +43,33 @@ function containsTerm(line: string, term: string): boolean {
 }
 
 /** Steg 1-filtret: dumt, snabbt, gratis. Returnerar rader som innehåller lexikon-träffar. */
-export function matchLexicon(text: string, extraTerms: string[] = []): LexiconHit[] {
+export function matchLexicon(
+  text: string,
+  extraTerms: string[] = [],
+  contextLines = 8,
+): LexiconHit[] {
   const terms = [...SEED_TERMS, ...extraTerms.map((t) => t.toLowerCase())];
   const hits: LexiconHit[] = [];
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (line.length > 500) continue; // minifierat/binärt skräp
     const term =
       terms.find((t) => containsTerm(line, t)) ??
       SEED_PATTERNS.find((p) => (p.lastIndex = 0, p.test(line)))?.source;
-    if (term) hits.push({ term, line: line.trim().slice(0, 300), lineNumber: i + 1 });
+    if (term) {
+      const start = Math.max(0, i - contextLines);
+      const end = Math.min(lines.length, i + contextLines + 1);
+      hits.push({
+        term,
+        line: line.trim().slice(0, 2000),
+        lineNumber: i + 1,
+        context: lines
+          .slice(start, end)
+          .map((value, offset) => `${start + offset + 1}: ${value}`)
+          .join("\n")
+          .slice(0, 12_000),
+      });
+    }
   }
   return hits;
 }
