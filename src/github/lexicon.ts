@@ -32,6 +32,13 @@ export interface LexiconHit {
   lineNumber: number;
 }
 
+function containsTerm(line: string, term: string): boolean {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Egna gränser i stället för \b: fungerar även för fraser och hindrar t.ex.
+  // "cat" från att matcha "category", "catch" och "concatenate".
+  return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, "i").test(line);
+}
+
 /** Steg 1-filtret: dumt, snabbt, gratis. Returnerar rader som innehåller lexikon-träffar. */
 export function matchLexicon(text: string, extraTerms: string[] = []): LexiconHit[] {
   const terms = [...SEED_TERMS, ...extraTerms.map((t) => t.toLowerCase())];
@@ -40,9 +47,8 @@ export function matchLexicon(text: string, extraTerms: string[] = []): LexiconHi
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line.length > 500) continue; // minifierat/binärt skräp
-    const lower = line.toLowerCase();
     const term =
-      terms.find((t) => lower.includes(t)) ??
+      terms.find((t) => containsTerm(line, t)) ??
       SEED_PATTERNS.find((p) => (p.lastIndex = 0, p.test(line)))?.source;
     if (term) hits.push({ term, line: line.trim().slice(0, 300), lineNumber: i + 1 });
   }
