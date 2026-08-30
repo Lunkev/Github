@@ -109,19 +109,23 @@ fortsätta vara en egen, alltid aktiv service.
 
 - [ ] Supabase → SQL Editor → kör **hela senaste** `supabase/schema.sql`
 - [ ] Kontrollera att SQL-körningen är grön utan fel
-- [ ] Kontrollera att befintlig Railway-service fortfarande använder `/railway.json`
-  och visar startkommandot `npm run pump-github`
+- [ ] Kontrollera att befintlig Railway-service visar startkommandot
+  `npm run pump-github`
+- [ ] Låt dess befintliga `/railway.json` vara kvar tills en separat, kontrollerad
+  IaC-migration görs. Den gamla Config-as-Code-filen är deprecated men fungerar
+  för den redan anslutna servicen till Railways hard cutoff 2026-12-01.
 
 ### Ny service: github-scan
 
 1. Railway → öppna samma projekt som `pump-github`
 2. `New` → skapa en service från samma GitHub-repo (`Lunkev/Github`, branch `main`)
 3. Döp den till `github-scan`
-4. Settings → Config as Code → ange den absoluta sökvägen `/railway.github.json`
-5. Redeploya och kontrollera:
-   - Start Command: `npm run github`
-   - Cron Schedule: `10 * * * *`
-6. Lägg in eller referera projektets Shared Variables:
+4. Lämna **Config as Code tomt**; `railway.json`/`railway.toml` är deprecated
+   och nya services ska inte anslutas till dem
+5. Settings → Deploy → Custom Start Command: `npm run github`
+6. Settings → Cron Schedule: `10 * * * *`
+7. Kontrollera att Source Repo är `Lunkev/Github` och branch `main`, sedan redeploya
+8. Lägg in eller referera projektets Shared Variables:
    - `ANTHROPIC_API_KEY`
    - `DISCORD_WEBHOOK_URL`
    - `DISCORD_WEBHOOK_MAYBE`
@@ -133,17 +137,17 @@ fortsätta vara en egen, alltid aktiv service.
    - `SUPABASE_SERVICE_KEY`
    - valfritt `GITHUB_CLAUDE_MONTHLY_BUDGET_USD=65`
    - valfritt `GITHUB_RUN_DEADLINE_MINUTES=22`
-7. Kör en manuell deployment. Loggen ska avslutas med `Klart:` och processen ska
+9. Kör en manuell deployment. Loggen ska avslutas med `Klart:` och processen ska
    avslutas; den får inte visa `pump-github live`
 
 ### Ny service: news-scan
 
 1. Skapa ytterligare en service från samma repo och döp den till `news-scan`
-2. Settings → Config as Code → ange `/railway.news.json`
-3. Redeploya och kontrollera:
-   - Start Command: `npm run news`
-   - Cron Schedule: `17 * * * *`
-4. Lägg in eller referera:
+2. Lämna **Config as Code tomt**
+3. Settings → Deploy → Custom Start Command: `npm run news`
+4. Settings → Cron Schedule: `17 * * * *`
+5. Kontrollera Source Repo `Lunkev/Github`, branch `main`, och redeploya
+6. Lägg in eller referera:
    - `ANTHROPIC_API_KEY`
    - `DISCORD_WEBHOOK_NEWS`
    - `DISCORD_BOT_TOKEN`
@@ -151,7 +155,7 @@ fortsätta vara en egen, alltid aktiv service.
    - `CHANNEL_NEWS_EXAMPLES_ID`
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_KEY`
-5. Kör manuellt. Loggen ska visa `Aktiva ämnen:` och sedan avslutas normalt
+7. Kör manuellt. Loggen ska visa `Aktiva ämnen:` och sedan avslutas normalt
 
 ### Verifiera och växla över
 
