@@ -16,7 +16,7 @@ Proaktiv narrativ-scanner för en Solana-memecoin-deployer. Samlar signaler (nyh
 - `npm run scan -- --dry` = torrkörning utan nycklar/DB/Discord. Ska alltid fungera.
 
 ## News Watch Scanner
-`src/newsScan.ts` läser `#news-watchlist` (`add`, `remove`, `list`, `analyze`), söker engelska USA/globala artiklar via Google News RSS, deduplicerar i `news_articles`, bedömer högst 15 nya artiklar med Claude Sonnet och postar högst fem fynd med score 65+ till den separata webhooken `DISCORD_WEBHOOK_NEWS`. Körs varje timme av `.github/workflows/daily.yml`. Den får aldrig falla tillbaka till gems-webhooken.
+`src/newsScan.ts` läser `#news-watchlist` (`add`, `remove`, `list`, `analyze`), söker engelska USA/globala artiklar via Google News RSS, deduplicerar i `news_articles`, bedömer högst 15 nya artiklar med Claude Sonnet och postar högst fem fynd med score 65+ till den separata webhooken `DISCORD_WEBHOOK_NEWS`. `#news-examples` sparar Kevins exakta article→coin→X-post-exempel i `news_examples`; högst 20 relevanta exempel följer med Sonnet-prompten och ger ett `readyPost`. Körs varje timme av `.github/workflows/daily.yml`. Den får aldrig falla tillbaka till gems-webhooken.
 
 ## GitHub-scannern (aktivt arbete)
 Flöde: `src/githubScan.ts` → Discord-inläsning (`src/discord/ingest.ts`: #watchlist + #proven) → watchlist expanderas → djupscan/diff-vakt (`src/github/scan.ts`) → lexikonfilter (`src/github/lexicon.ts`) → Claude-bedömning + DexScreener-koll (`src/github/judge.ts`) → alerts (`src/github/alert.ts`, hot/maybe, dagtid 07–23 Europe/Stockholm, nattfynd köas till morgonbrief). State + fynd i Supabase (`src/db/githubStore.ts`).

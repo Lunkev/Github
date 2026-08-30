@@ -76,3 +76,25 @@ Allt nedan gör du EN gång. Totalt ~30–45 min. Sen sköter systemet sig själ
 - [ ] Skriv ämnen i `#news-watchlist`: `add Elon Musk`, `add AI robots`, `add weird animal news`
 - [ ] Kommandon: `list`, `remove <ämne>`, `analyze https://...`
 - [ ] Kör workflowet manuellt en gång till. Därefter kör det varje timme och postar högst fem fynd med score 65+.
+
+### X-copy från dina egna exempel
+- [ ] Skapa `#news-examples` under Discord-kategorin NEWS
+- [ ] Ge befintliga botten View Channel, Read Message History och Send Messages i kanalen
+- [ ] Högerklicka kanalen → Copy Channel ID → GitHub Actions-secret `CHANNEL_NEWS_EXAMPLES_ID`
+- [ ] Supabase SQL Editor → kör `news_examples` + `alter table news_articles ... ready_post` från `supabase/schema.sql`
+- [ ] Posta 5–20 rena stilexempel i detta format:
+  ```text
+  ARTICLE:
+  https://...
+
+  NAME:
+  Coin Name
+
+  TICKER:
+  $TICKER
+
+  POST:
+  Exakt X-inlägg med riktiga radbrytningar.
+  ```
+- [ ] Actions → `news-scan` → Run workflow. Botten ska svara `Saved example #...`
+- [ ] Nya kvalificerade fynd i `#news-plays` får därefter ett `READY TO POST`-block

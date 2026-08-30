@@ -173,10 +173,29 @@ create table if not exists news_articles (
     check (status in ('pending','analyzed','skipped','alerted','error')),
   score int,
   candidate jsonb,
+  ready_post text,
   analyzed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+alter table news_articles add column if not exists ready_post text;
+
+-- Kevin-exempel: artikel → coinnamn/ticker → exakt X-post. Few-shot-minne för Sonnet.
+create table if not exists news_examples (
+  id bigint generated always as identity primary key,
+  fingerprint text not null unique,
+  article_url text not null,
+  article_title text,
+  article_summary text,
+  coin_name text not null,
+  ticker text not null,
+  x_post text not null,
+  source_message text not null,
+  active boolean not null default true,
   created_at timestamptz not null default now()
 );
 
 create index if not exists idx_news_topics_active on news_topics (active);
 create index if not exists idx_news_articles_created on news_articles (created_at desc);
 create index if not exists idx_news_articles_status on news_articles (status);
+create index if not exists idx_news_examples_active on news_examples (active, created_at desc);

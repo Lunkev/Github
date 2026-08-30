@@ -18,4 +18,16 @@ export interface NewsCandidate {
   whyNow: string;
   score: number;
   category: string;
+  readyPost: string;
+}
+
+export interface NewsExample {
+  id: number;
+  articleUrl: string;
+  articleTitle: string;
+  articleSummary: string;
+  coinName: string;
+  ticker: string;
+  xPost: string;
+  createdAt: string;
 }

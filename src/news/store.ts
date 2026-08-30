@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { config, hasKey } from "../config.js";
-import type { NewsArticle, NewsCandidate } from "./types.js";
+import type { NewsArticle, NewsCandidate, NewsExample } from "./types.js";
 
 let client: SupabaseClient | null = null;
 
@@ -57,6 +57,77 @@ export async function removeNewsTopic(query: string): Promise<boolean> {
     .select("id");
   if (error) console.error("news_topics remove:", error.message);
   return !error && (data?.length ?? 0) > 0;
+}
+
+export interface SaveNewsExampleInput {
+  fingerprint: string;
+  articleUrl: string;
+  articleTitle: string;
+  articleSummary: string;
+  coinName: string;
+  ticker: string;
+  xPost: string;
+  sourceMessage: string;
+}
+
+export async function saveNewsExample(
+  example: SaveNewsExampleInput,
+): Promise<{ id: number | null; duplicate: boolean; error: string | null }> {
+  const d = db();
+  if (!d) return { id: null, duplicate: false, error: "Supabase is not configured" };
+  const row = {
+    fingerprint: example.fingerprint,
+    article_url: example.articleUrl,
+    article_title: example.articleTitle || null,
+    article_summary: example.articleSummary || null,
+    coin_name: example.coinName,
+    ticker: example.ticker,
+    x_post: example.xPost,
+    source_message: example.sourceMessage,
+  };
+  const { data, error } = await d
+    .from("news_examples")
+    .upsert(row, { onConflict: "fingerprint", ignoreDuplicates: true })
+    .select("id")
+    .maybeSingle();
+  if (error) {
+    console.error("news_examples insert:", error.message);
+    return { id: null, duplicate: false, error: error.message };
+  }
+  if (data?.id) return { id: data.id as number, duplicate: false, error: null };
+
+  const { data: existing, error: lookupError } = await d
+    .from("news_examples")
+    .select("id")
+    .eq("fingerprint", example.fingerprint)
+    .maybeSingle();
+  if (lookupError) return { id: null, duplicate: false, error: lookupError.message };
+  return { id: (existing?.id as number | undefined) ?? null, duplicate: true, error: null };
+}
+
+export async function getNewsExamples(limit = 60): Promise<NewsExample[]> {
+  const d = db();
+  if (!d) return [];
+  const { data, error } = await d
+    .from("news_examples")
+    .select("id, article_url, article_title, article_summary, coin_name, ticker, x_post, created_at")
+    .eq("active", true)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) {
+    console.error("news_examples select:", error.message);
+    return [];
+  }
+  return (data ?? []).map((row) => ({
+    id: row.id as number,
+    articleUrl: row.article_url as string,
+    articleTitle: (row.article_title as string | null) ?? "",
+    articleSummary: (row.article_summary as string | null) ?? "",
+    coinName: row.coin_name as string,
+    ticker: row.ticker as string,
+    xPost: row.x_post as string,
+    createdAt: row.created_at as string,
+  }));
 }
 
 /** Reserverar nya artiklar atomiskt. Endast faktiskt insatta rader går vidare till Claude. */
@@ -140,6 +211,7 @@ export async function saveNewsResults(
           article_excerpt: article.articleExcerpt,
           score: candidate?.score ?? null,
           candidate: candidate ?? null,
+          ready_post: candidate?.readyPost ?? null,
           analyzed_at: new Date().toISOString(),
         })
         .eq("fingerprint", article.fingerprint);

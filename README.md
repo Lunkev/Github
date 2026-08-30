@@ -21,6 +21,7 @@ npm run typecheck
 | `DISCORD_WEBHOOK_URL` | Briefen | Discord: Server Settings → Integrations → Webhooks |
 | `DISCORD_WEBHOOK_NEWS` | News Watch-alerts | Discord-webhook för `#news-plays` |
 | `CHANNEL_NEWS_WATCHLIST_ID` | News-kommandon | Kanal-ID för `#news-watchlist` |
+| `CHANNEL_NEWS_EXAMPLES_ID` | X-copy-stilexempel | Kanal-ID för `#news-examples` |
 | `DISCORD_BOT_TOKEN` | Läsa/svara i watchlist-kanaler | Discord Developer Portal |
 | `TWITTERAPI_IO_KEY` | X-trender/KOLs | twitterapi.io (pay-per-call) |
 | `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` | Historik + proven coins | supabase.com (kör `supabase/schema.sql`) |

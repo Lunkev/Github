@@ -10,7 +10,8 @@ function ticker(value: string): string {
   return clean.startsWith("$") ? clean : `$${clean}`;
 }
 
-function formatNewsPlay(candidate: NewsCandidate, article: NewsArticle): string {
+export function formatNewsPlay(candidate: NewsCandidate, article: NewsArticle): string {
+  const readyPost = candidate.readyPost.replace(/```/g, "'''");
   return [
     `NEWS PLAY · ${candidate.score}/100 · ${candidate.category}`,
     "",
@@ -22,6 +23,11 @@ function formatNewsPlay(candidate: NewsCandidate, article: NewsArticle): string 
     candidate.narrative,
     `Angle: ${candidate.angle}`,
     `Why now: ${candidate.whyNow}`,
+    "",
+    "READY TO POST",
+    "```",
+    readyPost,
+    "```",
     "",
     article.url,
   ].join("\n");

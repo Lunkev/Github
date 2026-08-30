@@ -10,6 +10,7 @@ export const config = {
   channelProvenId: process.env.CHANNEL_PROVEN_ID ?? "",
   channelWatchlistId: process.env.CHANNEL_WATCHLIST_ID ?? "",
   channelNewsWatchlistId: process.env.CHANNEL_NEWS_WATCHLIST_ID ?? "",
+  channelNewsExamplesId: process.env.CHANNEL_NEWS_EXAMPLES_ID ?? "",
   // Lokalt: GITHUB_TOKEN i .env. I Actions: GITHUB_API_TOKEN (GITHUB_-prefix är reserverat för secrets där).
   githubToken: process.env.GITHUB_TOKEN ?? process.env.GITHUB_API_TOKEN ?? "",
   twitterApiIoKey: process.env.TWITTERAPI_IO_KEY ?? "",
