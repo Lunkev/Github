@@ -134,6 +134,7 @@ create table if not exists github_scan_units (
   fingerprint text primary key,
   repo text not null,
   kind text not null check (kind in ('commit','commit_file','deep_file','text_chunk')),
+  lane text not null default 'baseline' check (lane in ('fast','baseline')),
   commit_sha text not null,
   parent_sha text,
   path text,
@@ -154,9 +155,24 @@ create table if not exists github_scan_units (
 alter table github_scan_units drop constraint if exists github_scan_units_kind_check;
 alter table github_scan_units add constraint github_scan_units_kind_check
   check (kind in ('commit','commit_file','deep_file','text_chunk'));
+alter table github_scan_units add column if not exists lane text not null default 'baseline';
+alter table github_scan_units drop constraint if exists github_scan_units_lane_check;
+alter table github_scan_units add constraint github_scan_units_lane_check
+  check (lane in ('fast','baseline'));
 
-create index if not exists idx_github_scan_units_ready
-  on github_scan_units (status, next_attempt_at, created_at);
+-- Befintlig kö migreras utan att fingerprints ändras.
+update github_scan_units set lane = 'fast' where kind in ('commit','commit_file');
+update github_scan_units set lane = 'baseline' where kind = 'deep_file';
+update github_scan_units as child
+set lane = parent.lane
+from github_scan_units as parent
+where child.kind = 'text_chunk'
+  and child.parent_sha = parent.fingerprint
+  and child.lane is distinct from parent.lane;
+
+drop index if exists idx_github_scan_units_ready;
+create index idx_github_scan_units_ready
+  on github_scan_units (status, lane, next_attempt_at, created_at);
 create index if not exists idx_github_scan_units_repo
   on github_scan_units (repo, created_at);
 
@@ -165,6 +181,7 @@ create index if not exists idx_github_scan_units_repo
 create table if not exists github_candidates (
   fingerprint text primary key,
   unit_fingerprint text not null references github_scan_units(fingerprint) on delete cascade,
+  lane text not null default 'baseline' check (lane in ('fast','baseline')),
   repo text not null,
   path text not null,
   commit_sha text,
@@ -188,9 +205,20 @@ create table if not exists github_candidates (
 alter table github_candidates drop constraint if exists github_candidates_status_check;
 alter table github_candidates add constraint github_candidates_status_check
   check (status in ('pending','processing','judged','error','audit'));
+alter table github_candidates add column if not exists lane text not null default 'baseline';
+alter table github_candidates drop constraint if exists github_candidates_lane_check;
+alter table github_candidates add constraint github_candidates_lane_check
+  check (lane in ('fast','baseline'));
 
-create index if not exists idx_github_candidates_ready
-  on github_candidates (status, created_at);
+update github_candidates as candidate
+set lane = unit.lane
+from github_scan_units as unit
+where candidate.unit_fingerprint = unit.fingerprint
+  and candidate.lane is distinct from unit.lane;
+
+drop index if exists idx_github_candidates_ready;
+create index idx_github_candidates_ready
+  on github_candidates (status, lane, created_at);
 
 create table if not exists github_scan_runs (
   id bigint generated always as identity primary key,
@@ -208,14 +236,38 @@ create table if not exists github_scan_runs (
   findings_new int not null default 0,
   estimated_cost_usd numeric not null default 0,
   backlog_remaining int not null default 0,
+  fast_units_backlog int not null default 0,
+  baseline_units_backlog int not null default 0,
+  fast_candidates_backlog int not null default 0,
+  baseline_candidates_backlog int not null default 0,
+  oldest_fast_age_minutes numeric not null default 0,
+  oldest_baseline_age_minutes numeric not null default 0,
+  run_duration_seconds int,
+  stop_reason text check (stop_reason in ('empty','unit_cap','deadline','budget','error')),
   error text
 );
+
+alter table github_scan_runs add column if not exists fast_units_backlog int not null default 0;
+alter table github_scan_runs add column if not exists baseline_units_backlog int not null default 0;
+alter table github_scan_runs add column if not exists fast_candidates_backlog int not null default 0;
+alter table github_scan_runs add column if not exists baseline_candidates_backlog int not null default 0;
+alter table github_scan_runs add column if not exists oldest_fast_age_minutes numeric not null default 0;
+alter table github_scan_runs add column if not exists oldest_baseline_age_minutes numeric not null default 0;
+alter table github_scan_runs add column if not exists run_duration_seconds int;
+alter table github_scan_runs add column if not exists stop_reason text;
+alter table github_scan_runs drop constraint if exists github_scan_runs_stop_reason_check;
+alter table github_scan_runs add constraint github_scan_runs_stop_reason_check
+  check (stop_reason in ('empty','unit_cap','deadline','budget','error'));
 
 create index if not exists idx_github_scan_runs_started
   on github_scan_runs (started_at desc);
 
 -- Atomisk claim. En avbruten worker återtas efter 30 minuter.
-create or replace function claim_github_scan_units(p_limit int default 20)
+drop function if exists claim_github_scan_units(int);
+create or replace function claim_github_scan_units(
+  p_limit int default 20,
+  p_preferred_lane text default 'fast'
+)
 returns setof github_scan_units
 language plpgsql
 security definer
@@ -242,7 +294,9 @@ begin
       or (u.status = 'processing' and u.locked_at < now() - interval '30 minutes')
     )
     and u.attempt_count < 8
-    order by u.created_at
+    order by
+      (u.lane = case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end) desc,
+      u.created_at
     limit greatest(p_limit, 0)
     for update skip locked
   )
@@ -256,10 +310,14 @@ begin
 end;
 $$;
 
-revoke all on function claim_github_scan_units(int) from public;
-grant execute on function claim_github_scan_units(int) to service_role;
+revoke all on function claim_github_scan_units(int, text) from public;
+grant execute on function claim_github_scan_units(int, text) to service_role;
 
-create or replace function claim_github_candidates(p_limit int default 60)
+drop function if exists claim_github_candidates(int);
+create or replace function claim_github_candidates(
+  p_limit int default 60,
+  p_preferred_lane text default 'fast'
+)
 returns setof github_candidates
 language plpgsql
 security definer
@@ -285,7 +343,9 @@ begin
       or (c.status = 'processing' and c.locked_at < now() - interval '30 minutes')
     )
     and c.attempt_count < 8
-    order by c.created_at
+    order by
+      (c.lane = case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end) desc,
+      c.created_at
     limit greatest(p_limit, 0)
     for update skip locked
   )
@@ -299,8 +359,48 @@ begin
 end;
 $$;
 
-revoke all on function claim_github_candidates(int) from public;
-grant execute on function claim_github_candidates(int) to service_role;
+revoke all on function claim_github_candidates(int, text) from public;
+grant execute on function claim_github_candidates(int, text) to service_role;
+
+create or replace function get_github_backlog_metrics()
+returns table (
+  fast_units bigint,
+  baseline_units bigint,
+  fast_candidates bigint,
+  baseline_candidates bigint,
+  oldest_fast_minutes numeric,
+  oldest_baseline_minutes numeric
+)
+language sql
+security definer
+set search_path = public
+as $$
+  with active_units as (
+    select lane, created_at
+    from github_scan_units
+    where status in ('pending','error','processing')
+  ),
+  active_candidates as (
+    select lane, created_at
+    from github_candidates
+    where status in ('pending','error','processing')
+  ),
+  combined as (
+    select lane, created_at from active_units
+    union all
+    select lane, created_at from active_candidates
+  )
+  select
+    (select count(*) from active_units where lane = 'fast'),
+    (select count(*) from active_units where lane = 'baseline'),
+    (select count(*) from active_candidates where lane = 'fast'),
+    (select count(*) from active_candidates where lane = 'baseline'),
+    coalesce((select extract(epoch from (now() - min(created_at))) / 60 from combined where lane = 'fast'), 0),
+    coalesce((select extract(epoch from (now() - min(created_at))) / 60 from combined where lane = 'baseline'), 0);
+$$;
+
+revoke all on function get_github_backlog_metrics() from public;
+grant execute on function get_github_backlog_metrics() to service_role;
 
 -- Pump.fun coins vars website pekar på GitHub (live-scannern).
 create table if not exists github_coins (

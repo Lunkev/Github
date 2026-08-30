@@ -5,6 +5,11 @@ function positiveNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function boundedPercentage(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 5 && parsed <= 95 ? Math.round(parsed) : fallback;
+}
+
 export const config = {
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
   discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL ?? "",
@@ -49,6 +54,8 @@ export const config = {
   githubMaxUnitsPerRun: Math.floor(positiveNumber(process.env.GITHUB_MAX_UNITS_PER_RUN, 20)),
   githubMaxCandidatesPerRun: Math.floor(positiveNumber(process.env.GITHUB_MAX_CANDIDATES_PER_RUN, 60)),
   githubRunDeadlineMinutes: positiveNumber(process.env.GITHUB_RUN_DEADLINE_MINUTES, 22),
+  /** 5–95: båda lanes måste alltid få reserverad kapacitet. */
+  githubFastLanePercent: boundedPercentage(process.env.GITHUB_FAST_LANE_PERCENT, 80),
 };
 
 export const hasKey = {

@@ -137,6 +137,8 @@ fortsätta vara en egen, alltid aktiv service.
    - `SUPABASE_SERVICE_KEY`
    - valfritt `GITHUB_CLAUDE_MONTHLY_BUDGET_USD=65`
    - valfritt `GITHUB_RUN_DEADLINE_MINUTES=22`
+   - valfritt `GITHUB_FAST_LANE_PERCENT=80` (måste vara 5–95; 100 % tillåts
+     inte eftersom den historiska baslinjen då skulle svälta)
 9. Kör en manuell deployment. Loggen ska avslutas med `Klart:` och processen ska
    avslutas; den får inte visa `pump-github live`
 

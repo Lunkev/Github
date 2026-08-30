@@ -84,6 +84,7 @@ export async function runScannerFixtureTests(): Promise<void> {
     const input = {
       repo: "owner/repo",
       kind: "commit_file" as const,
+      lane: "fast" as const,
       commitSha: "sha-new",
       parentSha: "sha-old",
       path: renamedFileFixture.filename,
@@ -102,6 +103,7 @@ export async function runScannerFixtureTests(): Promise<void> {
     assert.equal(fallback.chunks.length, 2);
     assert.ok(fallback.chunks.some((chunk) => chunk.text.includes("Moon Badger")));
     assert.ok(fallback.chunks.some((chunk) => chunk.text.includes("Solar Badger")));
+    assert.equal(unit.lane, "fast");
   } finally {
     globalThis.fetch = originalFetch;
   }

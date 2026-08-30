@@ -2,6 +2,7 @@
 // En timeout eller budgetpaus kan därför skapa fördröjning men aldrig tyst bortfall.
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { config } from "./config.js";
 import {
   getGithubApiCallCount,
@@ -53,7 +54,7 @@ import {
   failUnit,
   finishCandidates,
   getAuditCount,
-  getBacklogCount,
+  getBacklogMetrics,
   getMonthlyUsage,
   getRepoState,
   saveCandidates,
@@ -62,6 +63,8 @@ import {
   updateRun,
   type ScanUnit,
   type ScanUnitInput,
+  type ScanLane,
+  type RunStopReason,
   type UsageTotals,
 } from "./github/unitStore.js";
 
@@ -88,6 +91,22 @@ export function estimateClaudeCost(usage: UsageTotals): number {
   );
 }
 
+/** Sprider den reserverade baseline-kapaciteten jämnt över körningen. */
+export function buildLaneSchedule(total: number, fastPercent: number): ScanLane[] {
+  const slots = Math.max(0, Math.floor(total));
+  if (slots === 0) return [];
+  if (slots === 1) return ["fast"];
+  const safePercent = Math.min(95, Math.max(5, Math.round(fastPercent)));
+  const fastSlots = Math.min(slots - 1, Math.max(1, Math.round((slots * safePercent) / 100)));
+  const baselineSlots = slots - fastSlots;
+  return Array.from({ length: slots }, (_, index) =>
+    Math.floor(((index + 1) * baselineSlots) / slots) >
+    Math.floor((index * baselineSlots) / slots)
+      ? "baseline"
+      : "fast",
+  );
+}
+
 function refFromFull(full: string): RepoRef {
   const [owner, repo] = full.split("/");
   if (!owner || !repo) throw new Error(`Ogiltigt repo: ${full}`);
@@ -98,6 +117,7 @@ function commitUnit(repo: string, commit: CommitRef): ScanUnitInput {
   return {
     repo,
     kind: "commit",
+    lane: "fast",
     commitSha: commit.sha,
     parentSha: commit.parentSha,
     payload: { message: commit.message, date: commit.date, url: commit.url },
@@ -109,6 +129,7 @@ function chunkUnit(parent: ScanUnit, chunk: TextChunk, index: number): ScanUnitI
   return {
     repo: parent.repo,
     kind: "text_chunk",
+    lane: parent.lane,
     commitSha: parent.commitSha,
     parentSha: parent.fingerprint,
     path: chunk.path,
@@ -174,6 +195,7 @@ async function enqueueBaseline(repo: string, ref: RepoRef, headSha: string): Pro
   const units: ScanUnitInput[] = tree.map((file) => ({
     repo,
     kind: "deep_file",
+    lane: "baseline",
     commitSha: headSha,
     path: file.path,
     blobSha: file.sha,
@@ -299,11 +321,14 @@ async function main() {
   const runId = await createRun(false);
   const startedAt = Date.now();
   const deadline = startedAt + config.githubRunDeadlineMinutes * 60_000;
+  const laneSchedule = buildLaneSchedule(config.githubMaxUnitsPerRun, config.githubFastLanePercent);
   const runUsage = zeroUsage();
   const priorUsage = await getMonthlyUsage();
   let unitsEnqueued = 0;
   let unitsProcessed = 0;
+  let unitSlotsUsed = 0;
   let findingsNew = 0;
+  let stopReason: RunStopReason = "empty";
   const warnings = newRepos.length ? [`Nya repos i bevakade orgs: ${newRepos.join(", ")}`] : [];
   const recordUsage = async (usage: UsageTotals): Promise<void> => {
     addUsage(runUsage, usage);
@@ -314,6 +339,7 @@ async function main() {
     // Discovery får alltid gå före AI-drain: nya commits säkras även vid stor backlog.
     for (const repo of targets) {
       if (Date.now() >= deadline) {
+        stopReason = "deadline";
         warnings.push(`Discovery nådde tidsbudgeten efter ${repo}; resterande repos tas nästa timme.`);
         break;
       }
@@ -330,12 +356,17 @@ async function main() {
 
     // Extraktion och Haiku körs unit-för-unit. Texten blir en egen hållbar
     // chunk-unit innan AI-anropet, så stora filer kan återupptas säkert.
-    while (unitsProcessed < config.githubMaxUnitsPerRun && Date.now() < deadline) {
+    while (unitSlotsUsed < config.githubMaxUnitsPerRun && Date.now() < deadline) {
       const totalUsage = { ...priorUsage };
       addUsage(totalUsage, runUsage);
-      if (estimateClaudeCost(totalUsage) >= config.githubClaudeMonthlyBudgetUsd) break;
-      const [unit] = await claimUnits(1);
+      if (estimateClaudeCost(totalUsage) >= config.githubClaudeMonthlyBudgetUsd) {
+        stopReason = "budget";
+        break;
+      }
+      const preferredLane = laneSchedule[unitSlotsUsed] ?? "fast";
+      const [unit] = await claimUnits(1, preferredLane);
       if (!unit) break;
+      unitSlotsUsed++;
       try {
         if (unit.kind !== "text_chunk") {
           const beforeCalls = getGithubApiCallCount();
@@ -362,7 +393,13 @@ async function main() {
         const ruleHits = extractRuleHits([chunk], learnedTerms);
         const ruleRecords = ruleHits.map((hit) => {
           const fingerprint = candidateFingerprint(unit.fingerprint, hit);
-          return { fingerprint, unitFingerprint: unit.fingerprint, hit, source: "rule" as const };
+          return {
+            fingerprint,
+            unitFingerprint: unit.fingerprint,
+            lane: unit.lane,
+            hit,
+            source: "rule" as const,
+          };
         });
         // Deterministiska träffar sparas även om Haiku tillfälligt ligger nere.
         await saveCandidates(ruleRecords);
@@ -374,6 +411,7 @@ async function main() {
           haikuRecords.set(fingerprint, {
             fingerprint,
             unitFingerprint: unit.fingerprint,
+            lane: unit.lane,
             hit,
             source: "haiku",
           });
@@ -391,6 +429,10 @@ async function main() {
         );
       }
     }
+    if (stopReason === "empty") {
+      if (Date.now() >= deadline) stopReason = "deadline";
+      else if (unitSlotsUsed >= config.githubMaxUnitsPerRun) stopReason = "unit_cap";
+    }
 
     // Sonnet dränerar samtliga claimade kandidater i interna batcher; ingen slice(0,80).
     const totalBeforeJudge = { ...priorUsage };
@@ -401,7 +443,15 @@ async function main() {
     ) {
       // En claim motsvarar exakt en Sonnet-batch. Tidigare lyckade batcher
       // kvitteras därför även om nästa timmes batch skulle fallera.
-      const candidates = await claimCandidates(Math.min(config.githubMaxCandidatesPerRun, 40));
+      const candidateLimit = Math.min(config.githubMaxCandidatesPerRun, 40);
+      const candidateSchedule = buildLaneSchedule(candidateLimit, config.githubFastLanePercent);
+      const fastCandidateSlots = candidateSchedule.filter((lane) => lane === "fast").length;
+      const baselineCandidateSlots = candidateLimit - fastCandidateSlots;
+      const fastCandidates =
+        fastCandidateSlots > 0 ? await claimCandidates(fastCandidateSlots, "fast") : [];
+      const baselineCandidates =
+        baselineCandidateSlots > 0 ? await claimCandidates(baselineCandidateSlots, "baseline") : [];
+      const candidates = [...fastCandidates, ...baselineCandidates];
       if (candidates.length > 0) {
         try {
           const judged = await judgeHits(
@@ -438,7 +488,12 @@ async function main() {
     const monthly = { ...priorUsage };
     addUsage(monthly, runUsage);
     const monthlyCost = estimateClaudeCost(monthly);
-    const backlog = await getBacklogCount();
+    const backlogMetrics = await getBacklogMetrics();
+    const backlog =
+      backlogMetrics.fastUnits +
+      backlogMetrics.baselineUnits +
+      backlogMetrics.fastCandidates +
+      backlogMetrics.baselineCandidates;
     const auditCount = await getAuditCount();
     if (monthlyCost >= 50) {
       const tier = monthlyCost >= config.githubClaudeMonthlyBudgetUsd ? "budget" : "warning";
@@ -453,6 +508,44 @@ async function main() {
       }
     }
     if (backlog > 1000) warnings.push(`Backloggen är ${backlog}; data är sparad men alerts kan vara fördröjda.`);
+    const previousLatencyLevel = (await getState("github_fast_latency_level")) ?? "healthy";
+    const latencyLevel =
+      backlogMetrics.oldestFastMinutes >= 360
+        ? "critical"
+        : backlogMetrics.oldestFastMinutes >= 120
+          ? "warning"
+          : "healthy";
+    if (latencyLevel !== previousLatencyLevel) {
+      if (latencyLevel === "healthy" && previousLatencyLevel !== "healthy") {
+        warnings.push(
+          `Fast lane har återhämtats; äldsta väntetid är ${Math.round(backlogMetrics.oldestFastMinutes)} min.`,
+        );
+      } else if (latencyLevel !== "healthy") {
+        warnings.push(
+          `Fast lane är ${latencyLevel === "critical" ? "kraftigt " : ""}försenad: ` +
+            `${Math.round(backlogMetrics.oldestFastMinutes)} min äldsta väntetid.`,
+        );
+      }
+      await setState("github_fast_latency_level", latencyLevel);
+    }
+    const stalled = unitsProcessed === 0 && backlogMetrics.fastUnits + backlogMetrics.baselineUnits > 0;
+    const wasStalled = (await getState("github_queue_stalled")) === "1";
+    if (stalled && !wasStalled) {
+      warnings.push(`Ingen scan-enhet processades trots ${backlogMetrics.fastUnits + backlogMetrics.baselineUnits} väntande.`);
+    } else if (!stalled && wasStalled) {
+      warnings.push("GitHub-kön processar enheter igen efter föregående driftstopp.");
+    }
+    await setState("github_queue_stalled", stalled ? "1" : "0");
+    const previousBacklog = Number((await getState("github_previous_backlog")) ?? backlog);
+    const previousGrowthRuns = Number((await getState("github_backlog_growth_runs")) ?? 0);
+    const growthRuns = backlog > previousBacklog ? previousGrowthRuns + 1 : 0;
+    if (growthRuns >= 3 && previousGrowthRuns < 3) {
+      warnings.push(`GitHub-kön har vuxit ${growthRuns} körningar i rad (${previousBacklog} → ${backlog}).`);
+    } else if (growthRuns === 0 && previousGrowthRuns >= 3) {
+      warnings.push(`GitHub-kön växer inte längre; backlog är ${backlog}.`);
+    }
+    await setState("github_previous_backlog", String(backlog));
+    await setState("github_backlog_growth_runs", String(growthRuns));
     const previousAuditCount = Number((await getState("github_audit_count")) ?? 0);
     if (auditCount > previousAuditCount) {
       warnings.push(
@@ -472,17 +565,34 @@ async function main() {
       findingsNew,
       estimatedCostUsd: estimateClaudeCost(runUsage),
       backlogRemaining: backlog,
+      backlog: backlogMetrics,
+      runDurationSeconds: Math.round((Date.now() - startedAt) / 1000),
+      stopReason,
       error: warnings.length ? warnings.slice(0, 20).join("\n") : null,
     });
     await setState("last_github_run", new Date().toISOString());
     console.log(
-      `Klart: ${unitsEnqueued} köade, ${unitsProcessed} processade, backlog ${backlog}, AI $${estimateClaudeCost(runUsage).toFixed(4)}.`,
+      `Klart: ${unitsEnqueued} köade, ${unitsProcessed} processade, ` +
+        `fast ${backlogMetrics.fastUnits + backlogMetrics.fastCandidates} (${Math.round(backlogMetrics.oldestFastMinutes)} min), ` +
+        `baseline ${backlogMetrics.baselineUnits + backlogMetrics.baselineCandidates} (${Math.round(backlogMetrics.oldestBaselineMinutes)} min), ` +
+        `stopp ${stopReason}, AI $${estimateClaudeCost(runUsage).toFixed(4)}.`,
     );
   } catch (error) {
+    const backlogMetrics = await getBacklogMetrics().catch(() => undefined);
+    const backlog = backlogMetrics
+      ? backlogMetrics.fastUnits +
+        backlogMetrics.baselineUnits +
+        backlogMetrics.fastCandidates +
+        backlogMetrics.baselineCandidates
+      : undefined;
     await updateRun(runId, {
       finishedAt: new Date().toISOString(),
       githubApiCalls: getGithubApiCallCount(),
       usage: runUsage,
+      backlogRemaining: backlog,
+      backlog: backlogMetrics,
+      runDurationSeconds: Math.round((Date.now() - startedAt) / 1000),
+      stopReason: "error",
       error: error instanceof Error ? error.message : String(error),
     });
     throw error;
@@ -516,6 +626,7 @@ async function runSelfTests(): Promise<void> {
       unitFingerprint({
         repo: "owner/repo",
         kind: "commit",
+        lane: "fast",
         commitSha: `sha-${index}`,
         parentSha: `sha-${index - 1}`,
       }),
@@ -544,8 +655,61 @@ async function runSelfTests(): Promise<void> {
     }),
     24,
   );
+
+  const schedule = buildLaneSchedule(20, 80);
+  assert.equal(schedule.filter((lane) => lane === "fast").length, 16);
+  assert.equal(schedule.filter((lane) => lane === "baseline").length, 4);
+  assert.deepEqual(
+    schedule.map((lane, index) => (lane === "baseline" ? index + 1 : 0)).filter(Boolean),
+    [5, 10, 15, 20],
+  );
+
+  // Claim-modellen fyller från andra lane när den föredragna är tom och
+  // behåller FIFO inom respektive lane.
+  const simulateClaims = (fast: number[], baseline: number[], lanes: ScanLane[]): number[] =>
+    lanes.flatMap((preferred) => {
+      const preferredQueue = preferred === "fast" ? fast : baseline;
+      const fallbackQueue = preferred === "fast" ? baseline : fast;
+      const item = preferredQueue.shift() ?? fallbackQueue.shift();
+      return item === undefined ? [] : [item];
+    });
+  assert.deepEqual(simulateClaims([1, 2], [101, 102], ["fast", "baseline", "fast", "baseline"]), [1, 101, 2, 102]);
+  assert.deepEqual(simulateClaims([], [101, 102], ["fast", "fast"]), [101, 102]);
+  assert.equal(simulateClaims(Array.from({ length: 100 }, (_, index) => index), [1000, 1001, 1002, 1003], schedule).filter((item) => item >= 1000).length, 4);
+  const continuousFast = Array.from({ length: 1_000 }, (_, index) => index);
+  const drainingBaseline = Array.from({ length: 12 }, (_, index) => 10_000 + index);
+  simulateClaims(continuousFast, drainingBaseline, [...schedule, ...schedule, ...schedule]);
+  assert.equal(drainingBaseline.length, 0);
+
+  const fastParent: ScanUnit = {
+    ...commitUnit("owner/repo", {
+      sha: "fast-sha",
+      parentSha: "parent-sha",
+      message: "fast",
+      date: "2026-01-01T00:00:00Z",
+      url: "https://example.test/fast",
+    }),
+    fingerprint: "fast-parent",
+    status: "processing",
+    attemptCount: 1,
+  };
+  const inheritedFast = chunkUnit(fastParent, { ...baseMeta, text: "fast", startLine: 1 }, 0);
+  assert.equal(inheritedFast.lane, "fast");
+  const inheritedBaseline = chunkUnit(
+    { ...fastParent, kind: "deep_file", lane: "baseline", fingerprint: "baseline-parent" },
+    { ...baseMeta, mode: "deep", text: "baseline", startLine: 1 },
+    0,
+  );
+  assert.equal(inheritedBaseline.lane, "baseline");
+
+  const queueSchema = await readFile(new URL("../supabase/schema.sql", import.meta.url), "utf8");
+  assert.match(queueSchema, /for update skip locked/i);
+  assert.match(queueSchema, /locked_at < now\(\) - interval '30 minutes'/i);
+  assert.match(queueSchema, /attempt_count < 8/i);
+  assert.match(queueSchema, /next_attempt_at <= now\(\)/i);
+
   await runScannerFixtureTests();
-  console.log("github:selftest OK — chunking, context, overflow, patch-fallback och kostnad.");
+  console.log("github:selftest OK — lane-arv, 16/4, fallback, FIFO, anti-starvation, retries och stale locks.");
 }
 
 (SELFTEST ? runSelfTests() : main())

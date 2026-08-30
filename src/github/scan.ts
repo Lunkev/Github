@@ -212,6 +212,7 @@ export async function extractUnit(unit: ScanUnit): Promise<UnitExtraction> {
     childUnits.push({
       repo: unit.repo,
       kind: "commit_file",
+      lane: unit.lane,
       commitSha: unit.commitSha,
       parentSha: details.parentSha,
       path: file.filename,

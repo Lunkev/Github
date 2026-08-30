@@ -5,10 +5,13 @@ import type { RawHit } from "./scan.js";
 
 export type ScanUnitKind = "commit" | "commit_file" | "deep_file" | "text_chunk";
 export type ScanUnitStatus = "pending" | "processing" | "done" | "error" | "audit";
+export type ScanLane = "fast" | "baseline";
+export type RunStopReason = "empty" | "unit_cap" | "deadline" | "budget" | "error";
 
 export interface ScanUnitInput {
   repo: string;
   kind: ScanUnitKind;
+  lane: ScanLane;
   commitSha: string;
   parentSha?: string | null;
   path?: string | null;
@@ -33,6 +36,7 @@ export interface RepoState {
 export interface CandidateRecord {
   fingerprint: string;
   unitFingerprint: string;
+  lane: ScanLane;
   hit: RawHit;
   source: "rule" | "haiku";
   attemptCount?: number;
@@ -55,7 +59,19 @@ export interface RunPatch {
   findingsNew?: number;
   estimatedCostUsd?: number;
   backlogRemaining?: number;
+  backlog?: BacklogMetrics;
+  runDurationSeconds?: number;
+  stopReason?: RunStopReason;
   error?: string | null;
+}
+
+export interface BacklogMetrics {
+  fastUnits: number;
+  baselineUnits: number;
+  fastCandidates: number;
+  baselineCandidates: number;
+  oldestFastMinutes: number;
+  oldestBaselineMinutes: number;
 }
 
 let client: SupabaseClient | null = null;
@@ -94,6 +110,7 @@ function mapUnit(row: Record<string, unknown>): ScanUnit {
     fingerprint: String(row.fingerprint),
     repo: String(row.repo),
     kind: row.kind as ScanUnitKind,
+    lane: row.lane as ScanLane,
     commitSha: String(row.commit_sha),
     parentSha: (row.parent_sha as string | null) ?? null,
     path: (row.path as string | null) ?? null,
@@ -113,7 +130,7 @@ function missingSchema(message: string): Error {
 export async function assertQueueSchema(): Promise<void> {
   const d = db();
   if (!d) throw new Error("SUPABASE_URL och SUPABASE_SERVICE_KEY krävs för förlustfri GitHub-kö.");
-  const { error } = await d.from("github_scan_units").select("fingerprint").limit(1);
+  const { error } = await d.from("github_scan_units").select("fingerprint,lane").limit(1);
   if (error) throw missingSchema(error.message);
 }
 
@@ -158,6 +175,7 @@ export async function enqueueUnits(units: ScanUnitInput[]): Promise<number> {
     parent_sha: unit.parentSha ?? null,
     path: unit.path ?? null,
     blob_sha: unit.blobSha ?? null,
+    lane: unit.lane,
     payload: unit.payload ?? {},
   }));
   const { data, error } = await d
@@ -168,10 +186,13 @@ export async function enqueueUnits(units: ScanUnitInput[]): Promise<number> {
   return data?.length ?? 0;
 }
 
-export async function claimUnits(limit: number): Promise<ScanUnit[]> {
+export async function claimUnits(limit: number, preferredLane: ScanLane): Promise<ScanUnit[]> {
   const d = db();
   if (!d) return [];
-  const { data, error } = await d.rpc("claim_github_scan_units", { p_limit: limit });
+  const { data, error } = await d.rpc("claim_github_scan_units", {
+    p_limit: limit,
+    p_preferred_lane: preferredLane,
+  });
   if (error) throw missingSchema(error.message);
   return ((data ?? []) as Record<string, unknown>[]).map(mapUnit);
 }
@@ -237,6 +258,7 @@ export async function saveCandidates(records: CandidateRecord[]): Promise<number
   const rows = records.map((record) => ({
     fingerprint: record.fingerprint,
     unit_fingerprint: record.unitFingerprint,
+    lane: record.lane,
     repo: record.hit.repo,
     path: record.hit.path,
     commit_sha: record.hit.commitSha ?? null,
@@ -257,14 +279,18 @@ export async function saveCandidates(records: CandidateRecord[]): Promise<number
   return data?.length ?? 0;
 }
 
-export async function claimCandidates(limit: number): Promise<CandidateRecord[]> {
+export async function claimCandidates(limit: number, preferredLane: ScanLane): Promise<CandidateRecord[]> {
   const d = db();
   if (!d) return [];
-  const { data, error } = await d.rpc("claim_github_candidates", { p_limit: limit });
+  const { data, error } = await d.rpc("claim_github_candidates", {
+    p_limit: limit,
+    p_preferred_lane: preferredLane,
+  });
   if (error) throw missingSchema(error.message);
   return ((data ?? []) as Record<string, unknown>[]).map((row) => ({
     fingerprint: String(row.fingerprint),
     unitFingerprint: String(row.unit_fingerprint),
+    lane: row.lane as ScanLane,
     source: row.source as "rule" | "haiku",
     attemptCount: Number(row.attempt_count ?? 0),
     hit: {
@@ -318,6 +344,16 @@ export async function updateRun(id: number | null, patch: RunPatch): Promise<voi
   if (patch.findingsNew !== undefined) row.findings_new = patch.findingsNew;
   if (patch.estimatedCostUsd !== undefined) row.estimated_cost_usd = patch.estimatedCostUsd;
   if (patch.backlogRemaining !== undefined) row.backlog_remaining = patch.backlogRemaining;
+  if (patch.backlog) {
+    row.fast_units_backlog = patch.backlog.fastUnits;
+    row.baseline_units_backlog = patch.backlog.baselineUnits;
+    row.fast_candidates_backlog = patch.backlog.fastCandidates;
+    row.baseline_candidates_backlog = patch.backlog.baselineCandidates;
+    row.oldest_fast_age_minutes = patch.backlog.oldestFastMinutes;
+    row.oldest_baseline_age_minutes = patch.backlog.oldestBaselineMinutes;
+  }
+  if (patch.runDurationSeconds !== undefined) row.run_duration_seconds = patch.runDurationSeconds;
+  if (patch.stopReason !== undefined) row.stop_reason = patch.stopReason;
   if (patch.error !== undefined) row.error = patch.error;
   const { error } = (await db()?.from("github_scan_runs").update(row).eq("id", id)) ?? {};
   if (error) console.error("github_scan_runs update:", error.message);
@@ -349,14 +385,28 @@ export async function getMonthlyUsage(now = new Date()): Promise<UsageTotals> {
   );
 }
 
-export async function getBacklogCount(): Promise<number> {
+export async function getBacklogMetrics(): Promise<BacklogMetrics> {
   const d = db();
-  if (!d) return 0;
-  const [units, candidates] = await Promise.all([
-    d.from("github_scan_units").select("*", { count: "exact", head: true }).in("status", ["pending", "error", "processing"]),
-    d.from("github_candidates").select("*", { count: "exact", head: true }).in("status", ["pending", "error", "processing"]),
-  ]);
-  return (units.count ?? 0) + (candidates.count ?? 0);
+  const zero = {
+    fastUnits: 0,
+    baselineUnits: 0,
+    fastCandidates: 0,
+    baselineCandidates: 0,
+    oldestFastMinutes: 0,
+    oldestBaselineMinutes: 0,
+  };
+  if (!d) return zero;
+  const { data, error } = await d.rpc("get_github_backlog_metrics");
+  if (error) throw missingSchema(error.message);
+  const row = (data?.[0] ?? {}) as Record<string, unknown>;
+  return {
+    fastUnits: Number(row.fast_units ?? 0),
+    baselineUnits: Number(row.baseline_units ?? 0),
+    fastCandidates: Number(row.fast_candidates ?? 0),
+    baselineCandidates: Number(row.baseline_candidates ?? 0),
+    oldestFastMinutes: Number(row.oldest_fast_minutes ?? 0),
+    oldestBaselineMinutes: Number(row.oldest_baseline_minutes ?? 0),
+  };
 }
 
 export async function getAuditCount(): Promise<number> {
