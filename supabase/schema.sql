@@ -482,3 +482,366 @@ create index if not exists idx_news_topics_active on news_topics (active);
 create index if not exists idx_news_articles_created on news_articles (created_at desc);
 create index if not exists idx_news_articles_status on news_articles (status);
 create index if not exists idx_news_examples_active on news_examples (active, created_at desc);
+
+-- ===== Twitter Scanner V1 =====
+
+create table if not exists twitter_queries (
+  id bigint generated always as identity primary key,
+  query text not null unique,
+  active boolean not null default true,
+  added_by text,
+  last_scanned_at timestamptz,
+  search_count bigint not null default 0,
+  result_count bigint not null default 0,
+  alert_count bigint not null default 0,
+  last_error text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists twitter_origins (
+  tweet_id text primary key,
+  url text not null,
+  text text not null,
+  author_handle text not null,
+  tweet_created_at timestamptz not null,
+  source_thread jsonb not null default '[]'::jsonb,
+  matched_query_ids jsonb not null default '[]'::jsonb,
+  view_count bigint not null default 0,
+  like_count bigint not null default 0,
+  retweet_count bigint not null default 0,
+  reply_count bigint not null default 0,
+  approximate_velocity numeric not null default 0,
+  observed_velocity numeric,
+  status text not null default 'watching'
+    check (status in ('watching','pending','judging','approved','writing','alerted','skipped','error','audit')),
+  attempt_count int not null default 0,
+  judge_attempt_count int not null default 0,
+  writer_attempt_count int not null default 0,
+  next_attempt_at timestamptz not null default now(),
+  locked_at timestamptz,
+  last_error text,
+  decision jsonb,
+  ready_post text,
+  alerted_at timestamptz,
+  inserted_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table twitter_origins add column if not exists judge_attempt_count int not null default 0;
+alter table twitter_origins add column if not exists writer_attempt_count int not null default 0;
+
+-- Sökresultat sparas före origin-lookups så deadline/API-fel aldrig tappar Top-träffar.
+create table if not exists twitter_discoveries (
+  tweet_id text primary key,
+  query_id bigint references twitter_queries(id) on delete set null,
+  tweet jsonb not null,
+  status text not null default 'pending'
+    check (status in ('pending','processing','done','error','audit')),
+  attempt_count int not null default 0,
+  next_attempt_at timestamptz not null default now(),
+  locked_at timestamptz,
+  last_error text,
+  created_at timestamptz not null default now(),
+  processed_at timestamptz
+);
+
+create table if not exists twitter_observations (
+  id bigint generated always as identity primary key,
+  tweet_id text not null references twitter_origins(tweet_id) on delete cascade,
+  observed_at timestamptz not null default now(),
+  view_count bigint not null default 0,
+  like_count bigint not null default 0,
+  retweet_count bigint not null default 0,
+  reply_count bigint not null default 0,
+  views_per_hour numeric
+);
+
+create table if not exists twitter_examples (
+  id bigint generated always as identity primary key,
+  fingerprint text not null unique,
+  origin_url text not null,
+  origin_text text,
+  coin_name text not null,
+  ticker text not null,
+  x_post text not null,
+  source_message text not null,
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists twitter_scan_runs (
+  id bigint generated always as identity primary key,
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  queries_claimed int not null default 0,
+  search_calls int not null default 0,
+  lookup_calls int not null default 0,
+  empty_twitter_calls int not null default 0,
+  returned_tweets int not null default 0,
+  origins_saved int not null default 0,
+  origins_judged int not null default 0,
+  posts_written int not null default 0,
+  alerts_sent int not null default 0,
+  anthropic_input_tokens bigint not null default 0,
+  anthropic_output_tokens bigint not null default 0,
+  twitter_cost_usd numeric not null default 0,
+  claude_cost_usd numeric not null default 0,
+  backlog int not null default 0,
+  oldest_pending_minutes numeric not null default 0,
+  run_duration_seconds int,
+  stop_reason text check (stop_reason in ('empty','complete','deadline','twitter_budget','claude_budget','locked','error')),
+  error text
+);
+alter table twitter_scan_runs add column if not exists empty_twitter_calls int not null default 0;
+
+create table if not exists twitter_runtime_lock (
+  singleton boolean primary key default true check (singleton),
+  owner text,
+  locked_until timestamptz
+);
+insert into twitter_runtime_lock (singleton) values (true) on conflict (singleton) do nothing;
+
+create index if not exists idx_twitter_queries_rotation
+  on twitter_queries (active, last_scanned_at nulls first, created_at);
+create index if not exists idx_twitter_origins_claim
+  on twitter_origins (status, next_attempt_at, inserted_at);
+create index if not exists idx_twitter_discoveries_claim
+  on twitter_discoveries (status, next_attempt_at, created_at);
+create index if not exists idx_twitter_origins_watch
+  on twitter_origins (status, updated_at) where status = 'watching';
+create index if not exists idx_twitter_observations_tweet
+  on twitter_observations (tweet_id, observed_at desc);
+create index if not exists idx_twitter_examples_active
+  on twitter_examples (active, created_at desc);
+create index if not exists idx_twitter_scan_runs_started
+  on twitter_scan_runs (started_at desc);
+
+create or replace function claim_twitter_queries(p_limit int default 6)
+returns setof twitter_queries
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  return query
+  with claimed as materialized (
+    select q.id
+    from twitter_queries q
+    where q.active = true
+    order by q.last_scanned_at nulls first, q.created_at, q.id
+    limit greatest(p_limit, 0)
+    for update skip locked
+  )
+  update twitter_queries q
+  set last_scanned_at = now(),
+      search_count = q.search_count + 1,
+      updated_at = now()
+  from claimed
+  where q.id = claimed.id
+  returning q.*;
+end;
+$$;
+
+create or replace function claim_twitter_judge(p_limit int default 6)
+returns setof twitter_origins
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update twitter_origins
+  set status = 'pending', locked_at = null
+  where status = 'judging' and locked_at < now() - interval '30 minutes';
+
+  update twitter_origins
+  set status = 'audit', locked_at = null,
+      last_error = coalesce(last_error, 'Retrygräns nådd')
+  where judge_attempt_count >= 8
+    and decision is null
+    and status in ('pending','error');
+
+  return query
+  with claimed as materialized (
+    select o.tweet_id
+    from twitter_origins o
+    where o.decision is null
+      and o.status in ('pending','error')
+      and o.next_attempt_at <= now()
+      and o.judge_attempt_count < 8
+    order by coalesce(o.observed_velocity, o.approximate_velocity) desc, o.inserted_at
+    limit greatest(p_limit, 0)
+    for update skip locked
+  )
+  update twitter_origins o
+  set status = 'judging',
+      locked_at = now(),
+      attempt_count = o.attempt_count + 1,
+      judge_attempt_count = o.judge_attempt_count + 1
+  from claimed
+  where o.tweet_id = claimed.tweet_id
+  returning o.*;
+end;
+$$;
+
+create or replace function claim_twitter_discoveries(p_limit int default 30)
+returns setof twitter_discoveries
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update twitter_discoveries
+  set status = 'pending', locked_at = null
+  where status = 'processing' and locked_at < now() - interval '30 minutes';
+
+  update twitter_discoveries
+  set status = 'audit', locked_at = null,
+      last_error = coalesce(last_error, 'Retrygräns nådd')
+  where attempt_count >= 8 and status in ('pending','error');
+
+  return query
+  with claimed as materialized (
+    select d.tweet_id
+    from twitter_discoveries d
+    where d.status in ('pending','error')
+      and d.next_attempt_at <= now()
+      and d.attempt_count < 8
+    order by d.created_at
+    limit greatest(p_limit, 0)
+    for update skip locked
+  )
+  update twitter_discoveries d
+  set status = 'processing',
+      locked_at = now(),
+      attempt_count = d.attempt_count + 1
+  from claimed
+  where d.tweet_id = claimed.tweet_id
+  returning d.*;
+end;
+$$;
+
+create or replace function claim_twitter_writer(p_limit int default 6)
+returns setof twitter_origins
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update twitter_origins
+  set status = 'approved', locked_at = null
+  where status = 'writing' and locked_at < now() - interval '30 minutes';
+
+  update twitter_origins
+  set status = 'audit', locked_at = null,
+      last_error = coalesce(last_error, 'Retrygräns nådd')
+  where writer_attempt_count >= 8
+    and decision is not null
+    and ready_post is null
+    and status in ('approved','error');
+
+  return query
+  with claimed as materialized (
+    select o.tweet_id
+    from twitter_origins o
+    where o.decision is not null
+      and (o.decision->>'approved')::boolean = true
+      and o.ready_post is null
+      and o.status in ('approved','error')
+      and o.next_attempt_at <= now()
+      and o.writer_attempt_count < 8
+    order by coalesce(o.observed_velocity, o.approximate_velocity) desc, o.inserted_at
+    limit greatest(p_limit, 0)
+    for update skip locked
+  )
+  update twitter_origins o
+  set status = 'writing',
+      locked_at = now(),
+      attempt_count = o.attempt_count + 1,
+      writer_attempt_count = o.writer_attempt_count + 1
+  from claimed
+  where o.tweet_id = claimed.tweet_id
+  returning o.*;
+end;
+$$;
+
+create or replace function get_twitter_backlog_metrics()
+returns table (backlog bigint, oldest_pending_minutes numeric)
+language sql
+security definer
+set search_path = public
+as $$
+  with pending as (
+    select inserted_at as queued_at
+    from twitter_origins
+    where status in ('pending','judging','approved','writing','error')
+    union all
+    select created_at
+    from twitter_discoveries
+    where status in ('pending','processing','error')
+  )
+  select
+    count(*),
+    coalesce(extract(epoch from (now() - min(queued_at))) / 60, 0)
+  from pending;
+$$;
+
+create or replace function prune_twitter_observations(p_keep_days int default 30)
+returns bigint
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare deleted_count bigint;
+begin
+  delete from twitter_observations
+  where observed_at < now() - make_interval(days => greatest(p_keep_days, 1));
+  get diagnostics deleted_count = row_count;
+  return deleted_count;
+end;
+$$;
+
+create or replace function claim_twitter_run(p_owner text, p_ttl_minutes int default 12)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare claimed boolean;
+begin
+  update twitter_runtime_lock
+  set owner = p_owner,
+      locked_until = now() + make_interval(mins => greatest(p_ttl_minutes, 1))
+  where singleton = true
+    and (locked_until is null or locked_until < now() or owner = p_owner)
+  returning true into claimed;
+  return coalesce(claimed, false);
+end;
+$$;
+
+create or replace function release_twitter_run(p_owner text)
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  update twitter_runtime_lock
+  set owner = null, locked_until = null
+  where singleton = true and owner = p_owner;
+$$;
+
+revoke all on function claim_twitter_queries(int) from public;
+revoke all on function claim_twitter_discoveries(int) from public;
+revoke all on function claim_twitter_judge(int) from public;
+revoke all on function claim_twitter_writer(int) from public;
+revoke all on function get_twitter_backlog_metrics() from public;
+revoke all on function prune_twitter_observations(int) from public;
+revoke all on function claim_twitter_run(text, int) from public;
+revoke all on function release_twitter_run(text) from public;
+grant execute on function claim_twitter_queries(int) to service_role;
+grant execute on function claim_twitter_discoveries(int) to service_role;
+grant execute on function claim_twitter_judge(int) to service_role;
+grant execute on function claim_twitter_writer(int) to service_role;
+grant execute on function get_twitter_backlog_metrics() to service_role;
+grant execute on function prune_twitter_observations(int) to service_role;
+grant execute on function claim_twitter_run(text, int) to service_role;
+grant execute on function release_twitter_run(text) to service_role;

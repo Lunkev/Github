@@ -8,6 +8,8 @@
     "github:selftest": "tsx src/githubScan.ts --selftest",
     "pump-github": "tsx src/pumpGithubScan.ts",
     "news": "tsx src/newsScan.ts",
+    "twitter": "tsx src/twitterScan.ts",
+    "twitter:selftest": "tsx src/twitter/selftest.ts",
     "scan": "tsx src/index.ts",
     "typecheck": "tsc --noEmit"
   },

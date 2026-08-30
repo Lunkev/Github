@@ -16,11 +16,15 @@ export const config = {
   discordWebhookMaybe: process.env.DISCORD_WEBHOOK_MAYBE ?? "",
   discordWebhookPumpGithub: process.env.DISCORD_WEBHOOK_PUMP_GITHUB ?? "",
   discordWebhookNews: process.env.DISCORD_WEBHOOK_NEWS ?? "",
+  discordWebhookTwitter: process.env.DISCORD_WEBHOOK_TWITTER ?? "",
+  discordWebhookTwitterDrift: process.env.DISCORD_WEBHOOK_TWITTER_DRIFT ?? "",
   discordBotToken: process.env.DISCORD_BOT_TOKEN ?? "",
   channelProvenId: process.env.CHANNEL_PROVEN_ID ?? "",
   channelWatchlistId: process.env.CHANNEL_WATCHLIST_ID ?? "",
   channelNewsWatchlistId: process.env.CHANNEL_NEWS_WATCHLIST_ID ?? "",
   channelNewsExamplesId: process.env.CHANNEL_NEWS_EXAMPLES_ID ?? "",
+  channelTwitterWatchlistId: process.env.CHANNEL_TWITTER_WATCHLIST_ID ?? "",
+  channelTwitterExamplesId: process.env.CHANNEL_TWITTER_EXAMPLES_ID ?? "",
   // Lokalt: GITHUB_TOKEN i .env. I Actions: GITHUB_API_TOKEN (GITHUB_-prefix är reserverat för secrets där).
   githubToken: process.env.GITHUB_TOKEN ?? process.env.GITHUB_API_TOKEN ?? "",
   twitterApiIoKey: process.env.TWITTERAPI_IO_KEY ?? "",
@@ -56,6 +60,16 @@ export const config = {
   githubRunDeadlineMinutes: positiveNumber(process.env.GITHUB_RUN_DEADLINE_MINUTES, 22),
   /** 5–95: båda lanes måste alltid få reserverad kapacitet. */
   githubFastLanePercent: boundedPercentage(process.env.GITHUB_FAST_LANE_PERCENT, 80),
+
+  twitterQueriesPerRun: Math.min(6, Math.floor(positiveNumber(process.env.TWITTER_QUERIES_PER_RUN, 6))),
+  twitterMaxCandidatesPerRun: Math.min(6, Math.floor(positiveNumber(process.env.TWITTER_MAX_CANDIDATES_PER_RUN, 6))),
+  twitterMaxAgeHours: positiveNumber(process.env.TWITTER_MAX_AGE_HOURS, 12),
+  twitterMinViews: Math.floor(positiveNumber(process.env.TWITTER_MIN_VIEWS, 8_000)),
+  twitterMinViewsPerHour: positiveNumber(process.env.TWITTER_MIN_VIEWS_PER_HOUR, 15_000),
+  twitterMonthlyApiBudgetUsd: positiveNumber(process.env.TWITTER_MONTHLY_API_BUDGET_USD, 40),
+  twitterMonthlyClaudeBudgetUsd: positiveNumber(process.env.TWITTER_MONTHLY_CLAUDE_BUDGET_USD, 20),
+  twitterClaudeModel: "claude-sonnet-4-6",
+  twitterRunDeadlineMinutes: positiveNumber(process.env.TWITTER_RUN_DEADLINE_MINUTES, 12),
 };
 
 export const hasKey = {
@@ -63,6 +77,8 @@ export const hasKey = {
   discord: () => config.discordWebhookUrl.length > 0,
   discordPumpGithub: () => config.discordWebhookPumpGithub.length > 0,
   discordNews: () => config.discordWebhookNews.length > 0,
+  discordTwitter: () => config.discordWebhookTwitter.length > 0,
+  discordTwitterDrift: () => config.discordWebhookTwitterDrift.length > 0,
   discordBot: () => config.discordBotToken.length > 0,
   github: () => config.githubToken.length > 0,
   twitter: () => config.twitterApiIoKey.length > 0,

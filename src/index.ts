@@ -5,7 +5,6 @@ import { fetchRssNews } from "./sources/rssNews.js";
 import { fetchHackerNews } from "./sources/hackerNews.js";
 import { fetchGoogleTrends } from "./sources/googleTrends.js";
 import { fetchReddit } from "./sources/reddit.js";
-import { fetchTwitter } from "./sources/twitter.js";
 import { fetchTikTok } from "./sources/tiktok.js";
 import { fetchTrendingTokens } from "./provenCoins/dexscreener.js";
 import { scoreNarratives } from "./analyze/scoreNarratives.js";
@@ -19,17 +18,16 @@ async function main() {
   console.log(`🔍 narrative-scanner ${DRY ? "(torrkörning)" : ""} — ${new Date().toISOString()}\n`);
 
   // 1. Samla alla källor parallellt — en trasig källa fäller aldrig helheten.
-  const [rss, hn, trends, reddit, twitter, tiktok, dex] = await Promise.all([
+  const [rss, hn, trends, reddit, tiktok, dex] = await Promise.all([
     fetchRssNews(config.freshnessHours),
     fetchHackerNews(config.freshnessHours),
     fetchGoogleTrends(),
     fetchReddit(),
-    fetchTwitter(),
     fetchTikTok(),
     fetchTrendingTokens(),
   ]);
 
-  const signals: Signal[] = [...rss, ...hn, ...trends, ...reddit, ...twitter, ...tiktok, ...dex];
+  const signals: Signal[] = [...rss, ...hn, ...trends, ...reddit, ...tiktok, ...dex];
   const bySource = signals.reduce<Record<string, number>>((acc, s) => {
     acc[s.source] = (acc[s.source] ?? 0) + 1;
     return acc;

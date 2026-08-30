@@ -182,3 +182,81 @@ fortsätta vara en egen, alltid aktiv service.
 Railway Hobby kostar minst $5/mån och inkluderar $5 resursanvändning. De två
 kortlivade cron-jobben kan ge några dollars överkostnad om den permanenta
 Pump-servicen redan använder krediten. Claude-kostnaden är oförändrad.
+
+## 11. Twitter Scanner V1
+
+### Discord
+
+1. Skapa kategorin `TWITTER SCANNER` med kanalerna `#twitter-watchlist`,
+   `#twitter-examples`, `#twitter-fynd` och `#twitter-drift`.
+2. Ge befintlig bot `View Channel`, `Read Message History` och `Send Messages`.
+3. Skapa separata webhooks i fynd- och driftkanalen.
+4. Aktivera Developer Mode och kopiera kanal-ID för watchlist och examples.
+
+### Databas och nycklar
+
+1. Kör hela senaste `supabase/schema.sql` i Supabase SQL Editor.
+2. Kontrollera TwitterAPI.io-saldo och Anthropic API-billing.
+3. Lägg in följande som Railway Shared Variables:
+   - `TWITTERAPI_IO_KEY`
+   - `ANTHROPIC_API_KEY`
+   - `SUPABASE_URL`
+   - `SUPABASE_SERVICE_KEY`
+   - `DISCORD_BOT_TOKEN`
+   - `CHANNEL_TWITTER_WATCHLIST_ID`
+   - `CHANNEL_TWITTER_EXAMPLES_ID`
+   - `DISCORD_WEBHOOK_TWITTER`
+   - `DISCORD_WEBHOOK_TWITTER_DRIFT`
+4. Defaults är sex frågor/körning, 12 timmar, 8 000 views, 15 000 views/timme,
+   $40 TwitterAPI.io och $20 Claude per månad. Se `.env.example` för overrides.
+
+### Railway
+
+1. Skapa en separat service `twitter-scan` från samma repo och branch `main`.
+2. Lämna Config as Code tomt.
+3. Custom Start Command: `npm run twitter`
+4. Cron Schedule: `*/15 * * * *`
+5. Kör först `npm run twitter:selftest` lokalt och därefter en manuell deployment.
+6. Loggen ska sluta med `Klart:` och processen ska avslutas före nästa körning.
+
+### Lägg in sökningar och exempel
+
+Flera sökningar kan läggas i ett Discord-meddelande:
+
+```text
+add cat OR dog OR zoo OR mascot OR "viral animal" min_faves:250
+add escaped (animal OR zoo OR tiger OR monkey OR bear) min_faves:250
+add mascot OR "japan mascot" min_faves:250
+add "justice for" min_faves:250
+add gato OR gata OR perro OR perra OR mascota OR "se escapó" min_faves:100
+add chien OR chienne OR "un chat" OR "le chat" OR "ce chat" OR mascotte min_faves:100
+add 猫 OR 貓 OR 狗 OR 犬 OR 动物 OR 動物 OR 吉祥物 min_faves:100
+add 动物园 OR 動物園 OR 逃跑 OR 逃出 OR 走失 OR 失踪 min_faves:100
+add 海豚 OR 海豹 OR 流浪猫 OR 流浪狗 OR 討公道 OR 讨公道 min_faves:100
+```
+
+Kommandon: `add`, `remove`, `pause`, `resume`, `list`, `stats`.
+
+Exempelformat:
+
+```text
+ORIGIN:
+https://x.com/handle/status/123
+Kort beskrivning av origin-händelsen
+
+NAME:
+COIN NAME
+
+TICKER:
+TICKER
+
+POST:
+Exakt X-post med önskade radbrytningar.
+```
+
+Lägg in minst 3–5 exempel. Låt därefter scannern gå 48 timmar och använd `stats`
+samt `twitter_scan_runs` för att bedöma faktisk kostnad innan intervall eller
+`min_faves` sänks.
+
+Rollback: pausa endast Railway-servicen `twitter-scan`. Twitter-kön ligger kvar
+i Supabase och övriga scanners påverkas inte.
