@@ -98,3 +98,81 @@ Allt nedan gör du EN gång. Totalt ~30–45 min. Sen sköter systemet sig själ
   ```
 - [ ] Actions → `news-scan` → Run workflow. Botten ska svara `Saved example #...`
 - [ ] Nya kvalificerade fynd i `#news-plays` får därefter ett `READY TO POST`-block
+
+## 10. Kör GitHub + News varje timme via Railway
+
+GitHub Actions-cron är best effort och kan försenas eller tappas. Railway Hobby kan
+köra båda som separata Cron Services. Den befintliga `pump-github`-servicen ska
+fortsätta vara en egen, alltid aktiv service.
+
+### Innan Railway-cron aktiveras
+
+- [ ] Supabase → SQL Editor → kör **hela senaste** `supabase/schema.sql`
+- [ ] Kontrollera att SQL-körningen är grön utan fel
+- [ ] Kontrollera att befintlig Railway-service fortfarande använder `/railway.json`
+  och visar startkommandot `npm run pump-github`
+
+### Ny service: github-scan
+
+1. Railway → öppna samma projekt som `pump-github`
+2. `New` → skapa en service från samma GitHub-repo (`Lunkev/Github`, branch `main`)
+3. Döp den till `github-scan`
+4. Settings → Config as Code → ange den absoluta sökvägen `/railway.github.json`
+5. Redeploya och kontrollera:
+   - Start Command: `npm run github`
+   - Cron Schedule: `10 * * * *`
+6. Lägg in eller referera projektets Shared Variables:
+   - `ANTHROPIC_API_KEY`
+   - `DISCORD_WEBHOOK_URL`
+   - `DISCORD_WEBHOOK_MAYBE`
+   - `DISCORD_BOT_TOKEN`
+   - `CHANNEL_PROVEN_ID`
+   - `CHANNEL_WATCHLIST_ID`
+   - `GITHUB_TOKEN`
+   - `SUPABASE_URL`
+   - `SUPABASE_SERVICE_KEY`
+   - valfritt `GITHUB_CLAUDE_MONTHLY_BUDGET_USD=65`
+   - valfritt `GITHUB_RUN_DEADLINE_MINUTES=22`
+7. Kör en manuell deployment. Loggen ska avslutas med `Klart:` och processen ska
+   avslutas; den får inte visa `pump-github live`
+
+### Ny service: news-scan
+
+1. Skapa ytterligare en service från samma repo och döp den till `news-scan`
+2. Settings → Config as Code → ange `/railway.news.json`
+3. Redeploya och kontrollera:
+   - Start Command: `npm run news`
+   - Cron Schedule: `17 * * * *`
+4. Lägg in eller referera:
+   - `ANTHROPIC_API_KEY`
+   - `DISCORD_WEBHOOK_NEWS`
+   - `DISCORD_BOT_TOKEN`
+   - `CHANNEL_NEWS_WATCHLIST_ID`
+   - `CHANNEL_NEWS_EXAMPLES_ID`
+   - `SUPABASE_URL`
+   - `SUPABASE_SERVICE_KEY`
+5. Kör manuellt. Loggen ska visa `Aktiva ämnen:` och sedan avslutas normalt
+
+### Verifiera och växla över
+
+1. Låt Railway och GitHub Actions överlappa under högst en testtimme
+2. Railway Deployments ska visa `github-scan` runt minut `:10` och `news-scan`
+   runt minut `:17` (UTC; några minuters avvikelse är normalt)
+3. Kontrollera att båda är färdiga långt före nästa heltimme. Railway hoppar över
+   nästa körning om föregående fortfarande lever
+4. GitHub → Settings → Secrets and variables → Actions → fliken Variables
+5. Skapa repository variable:
+   - Name: `RUN_SCHEDULED_SCANNERS_ON_GITHUB`
+   - Value: `false`
+6. Schemalagda GitHub Actions-jobb blir därefter skipped, men `Run workflow`
+   fortsätter fungera manuellt
+
+### Rollback
+
+1. Sätt `RUN_SCHEDULED_SCANNERS_ON_GITHUB=true` eller radera variabeln
+2. Pausa Railway-servicerna `github-scan` och `news-scan`
+3. GitHub Actions kör åter automatiskt varje timme
+
+Railway Hobby kostar minst $5/mån och inkluderar $5 resursanvändning. De två
+kortlivade cron-jobben kan ge några dollars överkostnad om den permanenta
+Pump-servicen redan använder krediten. Claude-kostnaden är oförändrad.
