@@ -127,6 +127,17 @@ function missingSchema(message: string): Error {
   );
 }
 
+function queueOperationError(operation: string, error: { message: string; code?: string }): Error {
+  const schemaCodes = new Set(["42P01", "42703", "42883", "PGRST202", "PGRST204"]);
+  if (
+    (error.code && schemaCodes.has(error.code)) ||
+    /does not exist|schema cache/i.test(error.message)
+  ) {
+    return missingSchema(error.message);
+  }
+  return new Error(`${operation}: ${error.message}`);
+}
+
 export async function assertQueueSchema(): Promise<void> {
   const d = db();
   if (!d) throw new Error("SUPABASE_URL och SUPABASE_SERVICE_KEY krävs för förlustfri GitHub-kö.");
@@ -193,7 +204,7 @@ export async function claimUnits(limit: number, preferredLane: ScanLane): Promis
     p_limit: limit,
     p_preferred_lane: preferredLane,
   });
-  if (error) throw missingSchema(error.message);
+  if (error) throw queueOperationError("claimUnits", error);
   return ((data ?? []) as Record<string, unknown>[]).map(mapUnit);
 }
 
@@ -286,7 +297,7 @@ export async function claimCandidates(limit: number, preferredLane: ScanLane): P
     p_limit: limit,
     p_preferred_lane: preferredLane,
   });
-  if (error) throw missingSchema(error.message);
+  if (error) throw queueOperationError("claimCandidates", error);
   return ((data ?? []) as Record<string, unknown>[]).map((row) => ({
     fingerprint: String(row.fingerprint),
     unitFingerprint: String(row.unit_fingerprint),

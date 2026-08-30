@@ -161,8 +161,12 @@ alter table github_scan_units add constraint github_scan_units_lane_check
   check (lane in ('fast','baseline'));
 
 -- Befintlig kö migreras utan att fingerprints ändras.
-update github_scan_units set lane = 'fast' where kind in ('commit','commit_file');
-update github_scan_units set lane = 'baseline' where kind = 'deep_file';
+update github_scan_units
+set lane = 'fast'
+where kind in ('commit','commit_file') and lane is distinct from 'fast';
+update github_scan_units
+set lane = 'baseline'
+where kind = 'deep_file' and lane is distinct from 'baseline';
 update github_scan_units as child
 set lane = parent.lane
 from github_scan_units as parent
@@ -171,8 +175,17 @@ where child.kind = 'text_chunk'
   and child.lane is distinct from parent.lane;
 
 drop index if exists idx_github_scan_units_ready;
-create index idx_github_scan_units_ready
-  on github_scan_units (status, lane, next_attempt_at, created_at);
+create index if not exists idx_github_scan_units_ready_lane_fifo
+  on github_scan_units (lane, created_at)
+  include (next_attempt_at)
+  where status in ('pending','error') and attempt_count < 8;
+create index if not exists idx_github_scan_units_stale
+  on github_scan_units (locked_at)
+  where status = 'processing';
+create index if not exists idx_github_scan_units_exhausted
+  on github_scan_units (attempt_count)
+  where attempt_count >= 8
+    and status in ('pending','error','processing');
 create index if not exists idx_github_scan_units_repo
   on github_scan_units (repo, created_at);
 
@@ -217,8 +230,16 @@ where candidate.unit_fingerprint = unit.fingerprint
   and candidate.lane is distinct from unit.lane;
 
 drop index if exists idx_github_candidates_ready;
-create index idx_github_candidates_ready
-  on github_candidates (status, lane, created_at);
+create index if not exists idx_github_candidates_ready_lane_fifo
+  on github_candidates (lane, created_at)
+  where status in ('pending','error') and attempt_count < 8;
+create index if not exists idx_github_candidates_stale
+  on github_candidates (locked_at)
+  where status = 'processing';
+create index if not exists idx_github_candidates_exhausted
+  on github_candidates (attempt_count)
+  where attempt_count >= 8
+    and status in ('pending','error','processing');
 
 create table if not exists github_scan_runs (
   id bigint generated always as identity primary key,
@@ -274,6 +295,17 @@ security definer
 set search_path = public
 as $$
 begin
+  -- Stale processing återställs separat så ready-claimen kan använda sitt
+  -- smala partial-index utan ett dyrt OR över hela kön.
+  update github_scan_units
+  set status = 'error',
+      locked_at = null,
+      next_attempt_at = now(),
+      last_error = coalesce(last_error, 'Stale lock återtagen')
+  where status = 'processing'
+    and locked_at < now() - interval '30 minutes'
+    and attempt_count < 8;
+
   update github_scan_units
   set status = 'audit',
       locked_at = null,
@@ -286,19 +318,32 @@ begin
     );
 
   return query
-  with claimed as materialized (
+  with preferred as materialized (
     select u.fingerprint
     from github_scan_units u
-    where (
-      (u.status in ('pending','error') and u.next_attempt_at <= now())
-      or (u.status = 'processing' and u.locked_at < now() - interval '30 minutes')
-    )
-    and u.attempt_count < 8
-    order by
-      (u.lane = case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end) desc,
-      u.created_at
+    where u.status in ('pending','error')
+      and u.next_attempt_at <= now()
+      and u.attempt_count < 8
+      and u.lane = case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end
+    order by u.created_at
     limit greatest(p_limit, 0)
     for update skip locked
+  ),
+  fallback as materialized (
+    select u.fingerprint
+    from github_scan_units u
+    where u.status in ('pending','error')
+      and u.next_attempt_at <= now()
+      and u.attempt_count < 8
+      and u.lane <> case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end
+    order by u.created_at
+    limit greatest(p_limit - (select count(*)::int from preferred), 0)
+    for update skip locked
+  ),
+  claimed as materialized (
+    select fingerprint from preferred
+    union all
+    select fingerprint from fallback
   )
   update github_scan_units u
   set status = 'processing',
@@ -325,6 +370,14 @@ set search_path = public
 as $$
 begin
   update github_candidates
+  set status = 'error',
+      locked_at = null,
+      last_error = coalesce(last_error, 'Stale lock återtagen')
+  where status = 'processing'
+    and locked_at < now() - interval '30 minutes'
+    and attempt_count < 8;
+
+  update github_candidates
   set status = 'audit',
       locked_at = null,
       last_error = coalesce(last_error, 'Retrygräns nådd')
@@ -335,19 +388,30 @@ begin
     );
 
   return query
-  with claimed as materialized (
+  with preferred as materialized (
     select c.fingerprint
     from github_candidates c
-    where (
-      c.status in ('pending','error')
-      or (c.status = 'processing' and c.locked_at < now() - interval '30 minutes')
-    )
-    and c.attempt_count < 8
-    order by
-      (c.lane = case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end) desc,
-      c.created_at
+    where c.status in ('pending','error')
+      and c.attempt_count < 8
+      and c.lane = case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end
+    order by c.created_at
     limit greatest(p_limit, 0)
     for update skip locked
+  ),
+  fallback as materialized (
+    select c.fingerprint
+    from github_candidates c
+    where c.status in ('pending','error')
+      and c.attempt_count < 8
+      and c.lane <> case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end
+    order by c.created_at
+    limit greatest(p_limit - (select count(*)::int from preferred), 0)
+    for update skip locked
+  ),
+  claimed as materialized (
+    select fingerprint from preferred
+    union all
+    select fingerprint from fallback
   )
   update github_candidates c
   set status = 'processing',

@@ -707,6 +707,9 @@ async function runSelfTests(): Promise<void> {
   assert.match(queueSchema, /locked_at < now\(\) - interval '30 minutes'/i);
   assert.match(queueSchema, /attempt_count < 8/i);
   assert.match(queueSchema, /next_attempt_at <= now\(\)/i);
+  assert.match(queueSchema, /idx_github_scan_units_ready_lane_fifo/i);
+  assert.match(queueSchema, /with preferred as materialized/i);
+  assert.match(queueSchema, /fallback as materialized/i);
 
   await runScannerFixtureTests();
   console.log("github:selftest OK — lane-arv, 16/4, fallback, FIFO, anti-starvation, retries och stale locks.");
