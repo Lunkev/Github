@@ -4,14 +4,17 @@ import { config, hasKey } from "../config.js";
 import type { RawHit } from "./scan.js";
 
 export type ScanUnitKind = "commit" | "commit_file" | "deep_file" | "text_chunk";
-export type ScanUnitStatus = "pending" | "processing" | "done" | "error" | "audit";
+export type ScanUnitStatus = "pending" | "processing" | "done" | "error" | "audit" | "skipped";
 export type ScanLane = "fast" | "baseline";
+export type ScanMode = "content" | "path_only";
 export type RunStopReason = "empty" | "unit_cap" | "deadline" | "budget" | "error";
 
 export interface ScanUnitInput {
   repo: string;
   kind: ScanUnitKind;
   lane: ScanLane;
+  scanMode?: ScanMode;
+  skipReason?: string | null;
   commitSha: string;
   parentSha?: string | null;
   path?: string | null;
@@ -54,6 +57,7 @@ export interface RunPatch {
   reposTouched?: number;
   unitsEnqueued?: number;
   unitsProcessed?: number;
+  pathOnlyProcessed?: number;
   githubApiCalls?: number;
   usage?: UsageTotals;
   findingsNew?: number;
@@ -70,6 +74,8 @@ export interface BacklogMetrics {
   baselineUnits: number;
   fastCandidates: number;
   baselineCandidates: number;
+  pathOnlyUnits: number;
+  skippedUnits: number;
   oldestFastMinutes: number;
   oldestBaselineMinutes: number;
 }
@@ -111,6 +117,8 @@ function mapUnit(row: Record<string, unknown>): ScanUnit {
     repo: String(row.repo),
     kind: row.kind as ScanUnitKind,
     lane: row.lane as ScanLane,
+    scanMode: (row.scan_mode as ScanMode | null) ?? "content",
+    skipReason: (row.skip_reason as string | null) ?? null,
     commitSha: String(row.commit_sha),
     parentSha: (row.parent_sha as string | null) ?? null,
     path: (row.path as string | null) ?? null,
@@ -141,7 +149,10 @@ function queueOperationError(operation: string, error: { message: string; code?:
 export async function assertQueueSchema(): Promise<void> {
   const d = db();
   if (!d) throw new Error("SUPABASE_URL och SUPABASE_SERVICE_KEY krävs för förlustfri GitHub-kö.");
-  const { error } = await d.from("github_scan_units").select("fingerprint,lane").limit(1);
+  const { error } = await d
+    .from("github_scan_units")
+    .select("fingerprint,lane,scan_mode,skip_reason")
+    .limit(1);
   if (error) throw missingSchema(error.message);
 }
 
@@ -187,6 +198,8 @@ export async function enqueueUnits(units: ScanUnitInput[]): Promise<number> {
     path: unit.path ?? null,
     blob_sha: unit.blobSha ?? null,
     lane: unit.lane,
+    scan_mode: unit.scanMode ?? "content",
+    skip_reason: unit.skipReason ?? null,
     payload: unit.payload ?? {},
   }));
   const { data, error } = await d
@@ -208,6 +221,22 @@ export async function claimUnits(limit: number, preferredLane: ScanLane): Promis
   return ((data ?? []) as Record<string, unknown>[]).map(mapUnit);
 }
 
+export async function claimPathOnlyUnits(limit: number): Promise<ScanUnit[]> {
+  const d = db();
+  if (!d || limit <= 0) return [];
+  const { data, error } = await d.rpc("claim_github_path_only_units", { p_limit: limit });
+  if (error) throw queueOperationError("claimPathOnlyUnits", error);
+  return ((data ?? []) as Record<string, unknown>[]).map(mapUnit);
+}
+
+export async function classifyQueuedPathOnly(limit: number): Promise<number> {
+  const d = db();
+  if (!d || limit <= 0) return 0;
+  const { data, error } = await d.rpc("classify_github_path_only_units", { p_limit: limit });
+  if (error) throw queueOperationError("classifyQueuedPathOnly", error);
+  return Number(data ?? 0);
+}
+
 export async function completeUnit(
   fingerprint: string,
   githubApiCalls: number,
@@ -226,6 +255,37 @@ export async function completeUnit(
       })
       .eq("fingerprint", fingerprint)) ?? {};
   if (error) throw new Error(`completeUnit: ${error.message}`);
+}
+
+export async function skipUnit(fingerprint: string, reason: string): Promise<void> {
+  const { error } =
+    (await db()
+      ?.from("github_scan_units")
+      .update({
+        status: "skipped",
+        scan_mode: "path_only",
+        skip_reason: reason.slice(0, 500),
+        processed_at: new Date().toISOString(),
+        locked_at: null,
+        last_error: null,
+      })
+      .eq("fingerprint", fingerprint)) ?? {};
+  if (error) throw new Error(`skipUnit: ${error.message}`);
+}
+
+export async function completePathOnlyUnits(fingerprints: string[]): Promise<void> {
+  if (fingerprints.length === 0) return;
+  const { error } =
+    (await db()
+      ?.from("github_scan_units")
+      .update({
+        status: "skipped",
+        processed_at: new Date().toISOString(),
+        locked_at: null,
+        last_error: null,
+      })
+      .in("fingerprint", fingerprints)) ?? {};
+  if (error) throw new Error(`completePathOnlyUnits: ${error.message}`);
 }
 
 export async function failUnit(unit: ScanUnit, errorValue: unknown): Promise<void> {
@@ -345,6 +405,7 @@ export async function updateRun(id: number | null, patch: RunPatch): Promise<voi
   if (patch.reposTouched !== undefined) row.repos_touched = patch.reposTouched;
   if (patch.unitsEnqueued !== undefined) row.units_enqueued = patch.unitsEnqueued;
   if (patch.unitsProcessed !== undefined) row.units_processed = patch.unitsProcessed;
+  if (patch.pathOnlyProcessed !== undefined) row.path_only_processed = patch.pathOnlyProcessed;
   if (patch.githubApiCalls !== undefined) row.github_api_calls = patch.githubApiCalls;
   if (patch.usage) {
     row.claude_haiku_input_tokens = patch.usage.haikuInput;
@@ -360,6 +421,8 @@ export async function updateRun(id: number | null, patch: RunPatch): Promise<voi
     row.baseline_units_backlog = patch.backlog.baselineUnits;
     row.fast_candidates_backlog = patch.backlog.fastCandidates;
     row.baseline_candidates_backlog = patch.backlog.baselineCandidates;
+    row.path_only_units_backlog = patch.backlog.pathOnlyUnits;
+    row.skipped_units_total = patch.backlog.skippedUnits;
     row.oldest_fast_age_minutes = patch.backlog.oldestFastMinutes;
     row.oldest_baseline_age_minutes = patch.backlog.oldestBaselineMinutes;
   }
@@ -403,6 +466,8 @@ export async function getBacklogMetrics(): Promise<BacklogMetrics> {
     baselineUnits: 0,
     fastCandidates: 0,
     baselineCandidates: 0,
+    pathOnlyUnits: 0,
+    skippedUnits: 0,
     oldestFastMinutes: 0,
     oldestBaselineMinutes: 0,
   };
@@ -415,6 +480,8 @@ export async function getBacklogMetrics(): Promise<BacklogMetrics> {
     baselineUnits: Number(row.baseline_units ?? 0),
     fastCandidates: Number(row.fast_candidates ?? 0),
     baselineCandidates: Number(row.baseline_candidates ?? 0),
+    pathOnlyUnits: Number(row.path_only_units ?? 0),
+    skippedUnits: Number(row.skipped_units ?? 0),
     oldestFastMinutes: Number(row.oldest_fast_minutes ?? 0),
     oldestBaselineMinutes: Number(row.oldest_baseline_minutes ?? 0),
   };

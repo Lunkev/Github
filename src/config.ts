@@ -18,6 +18,7 @@ export const config = {
   discordWebhookNews: process.env.DISCORD_WEBHOOK_NEWS ?? "",
   discordWebhookTwitter: process.env.DISCORD_WEBHOOK_TWITTER ?? "",
   discordWebhookTwitterDrift: process.env.DISCORD_WEBHOOK_TWITTER_DRIFT ?? "",
+  discordWebhookGithubDrift: process.env.DISCORD_WEBHOOK_GITHUB_DRIFT ?? "",
   discordBotToken: process.env.DISCORD_BOT_TOKEN ?? "",
   channelProvenId: process.env.CHANNEL_PROVEN_ID ?? "",
   channelWatchlistId: process.env.CHANNEL_WATCHLIST_ID ?? "",
@@ -55,11 +56,12 @@ export const config = {
 
   /** GitHub-scannerns AI-del får använda högst $65; ~$10 lämnas till Actions inom totalmålet $75. */
   githubClaudeMonthlyBudgetUsd: positiveNumber(process.env.GITHUB_CLAUDE_MONTHLY_BUDGET_USD, 65),
-  githubMaxUnitsPerRun: Math.floor(positiveNumber(process.env.GITHUB_MAX_UNITS_PER_RUN, 20)),
+  githubMaxUnitsPerRun: Math.floor(positiveNumber(process.env.GITHUB_MAX_UNITS_PER_RUN, 30)),
+  githubMaxPathOnlyPerRun: Math.floor(positiveNumber(process.env.GITHUB_MAX_PATH_ONLY_PER_RUN, 5_000)),
   githubMaxCandidatesPerRun: Math.floor(positiveNumber(process.env.GITHUB_MAX_CANDIDATES_PER_RUN, 60)),
   githubRunDeadlineMinutes: positiveNumber(process.env.GITHUB_RUN_DEADLINE_MINUTES, 22),
   /** 5–95: båda lanes måste alltid få reserverad kapacitet. */
-  githubFastLanePercent: boundedPercentage(process.env.GITHUB_FAST_LANE_PERCENT, 80),
+  githubFastLanePercent: boundedPercentage(process.env.GITHUB_FAST_LANE_PERCENT, 65),
 
   twitterQueriesPerRun: Math.min(6, Math.floor(positiveNumber(process.env.TWITTER_QUERIES_PER_RUN, 6))),
   twitterMaxCandidatesPerRun: Math.min(6, Math.floor(positiveNumber(process.env.TWITTER_MAX_CANDIDATES_PER_RUN, 6))),
@@ -79,6 +81,7 @@ export const hasKey = {
   discordNews: () => config.discordWebhookNews.length > 0,
   discordTwitter: () => config.discordWebhookTwitter.length > 0,
   discordTwitterDrift: () => config.discordWebhookTwitterDrift.length > 0,
+  discordGithubDrift: () => config.discordWebhookGithubDrift.length > 0,
   discordBot: () => config.discordBotToken.length > 0,
   github: () => config.githubToken.length > 0,
   twitter: () => config.twitterApiIoKey.length > 0,

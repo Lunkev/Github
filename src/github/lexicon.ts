@@ -74,14 +74,4 @@ export function matchLexicon(
   return hits;
 }
 
-/** Filer värda att läsa i en djupscan — docs, exempel, metadata. Inte varje kodrad. */
-export function isInterestingFile(path: string, size: number): boolean {
-  if (size > 200_000) return false;
-  const p = path.toLowerCase();
-  const ext = p.split(".").pop() ?? "";
-  const goodExt = ["md", "mdx", "txt", "json", "yml", "yaml", "toml"].includes(ext);
-  const goodDir = ["doc", "example", "reference", "metadata", "skill", "template", "asset"].some(
-    (d) => p.includes(d),
-  );
-  return goodExt || goodDir;
-}
+export { isInterestingFile } from "./filePolicy.js";

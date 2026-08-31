@@ -129,6 +129,8 @@ fortsätta vara en egen, alltid aktiv service.
    - `ANTHROPIC_API_KEY`
    - `DISCORD_WEBHOOK_URL`
    - `DISCORD_WEBHOOK_MAYBE`
+   - `DISCORD_WEBHOOK_GITHUB_DRIFT` (egen webhook till `#github-drift`; drift
+     faller aldrig tillbaka till en gems-kanal)
    - `DISCORD_BOT_TOKEN`
    - `CHANNEL_PROVEN_ID`
    - `CHANNEL_WATCHLIST_ID`
@@ -136,11 +138,42 @@ fortsätta vara en egen, alltid aktiv service.
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_KEY`
    - valfritt `GITHUB_CLAUDE_MONTHLY_BUDGET_USD=65`
+   - valfritt `GITHUB_MAX_UNITS_PER_RUN=30`
+   - valfritt `GITHUB_MAX_PATH_ONLY_PER_RUN=5000`
    - valfritt `GITHUB_RUN_DEADLINE_MINUTES=22`
-   - valfritt `GITHUB_FAST_LANE_PERCENT=80` (måste vara 5–95; 100 % tillåts
-     inte eftersom den historiska baslinjen då skulle svälta)
+   - valfritt `GITHUB_FAST_LANE_PERCENT=65` (frisk andel, måste vara 5–95;
+     vid minst 90 min fast-lane-försening används automatiskt 90 %)
 9. Kör en manuell deployment. Loggen ska avslutas med `Klart:` och processen ska
    avslutas; den får inte visa `pump-github live`
+
+#### Engångssteg för GitHub-drift och gammal baseline
+
+1. Skapa Discord-kanalen `#github-drift`.
+2. Serverinställningar → Integrationer → Webhooks → Ny webhook → välj
+   `#github-drift` och kopiera URL:en.
+3. Lägg URL:en som `DISCORD_WEBHOOK_GITHUB_DRIFT` i Railway. Lägg samma namn
+   som repository secret om GitHub Actions ska kunna användas som reserv.
+4. Kör hela `supabase/schema.sql` i Supabase SQL Editor innan ny kod deployas.
+   Migreringen raderar inga köposter: exkluderade filer blir spårbara path-only
+   och gamla rena binär-audits omklassificeras. Den gamla stora kön
+   klassificeras sedan automatiskt i 5 000-radersbatcher under följande scans.
+5. Redeploya och kör en manuell scan. Drift ska bara synas i `#github-drift`.
+6. Kontrollera kön:
+
+```sql
+select * from get_github_backlog_metrics();
+
+select scan_mode, status, count(*)
+from github_scan_units
+group by scan_mode, status
+order by scan_mode, status;
+
+select lane, count(*)
+from github_scan_units
+where status in ('pending','error','processing')
+group by lane
+order by lane;
+```
 
 ### Ny service: news-scan
 

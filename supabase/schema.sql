@@ -140,8 +140,11 @@ create table if not exists github_scan_units (
   path text,
   blob_sha text,
   payload jsonb not null default '{}'::jsonb,
+  scan_mode text not null default 'content'
+    check (scan_mode in ('content','path_only')),
+  skip_reason text,
   status text not null default 'pending'
-    check (status in ('pending','processing','done','error','audit')),
+    check (status in ('pending','processing','done','error','audit','skipped')),
   attempt_count int not null default 0,
   next_attempt_at timestamptz not null default now(),
   locked_at timestamptz,
@@ -156,9 +159,17 @@ alter table github_scan_units drop constraint if exists github_scan_units_kind_c
 alter table github_scan_units add constraint github_scan_units_kind_check
   check (kind in ('commit','commit_file','deep_file','text_chunk'));
 alter table github_scan_units add column if not exists lane text not null default 'baseline';
+alter table github_scan_units add column if not exists scan_mode text not null default 'content';
+alter table github_scan_units add column if not exists skip_reason text;
 alter table github_scan_units drop constraint if exists github_scan_units_lane_check;
 alter table github_scan_units add constraint github_scan_units_lane_check
   check (lane in ('fast','baseline'));
+alter table github_scan_units drop constraint if exists github_scan_units_scan_mode_check;
+alter table github_scan_units add constraint github_scan_units_scan_mode_check
+  check (scan_mode in ('content','path_only'));
+alter table github_scan_units drop constraint if exists github_scan_units_status_check;
+alter table github_scan_units add constraint github_scan_units_status_check
+  check (status in ('pending','processing','done','error','audit','skipped'));
 
 -- Befintlig kö migreras utan att fingerprints ändras.
 update github_scan_units
@@ -174,11 +185,31 @@ where child.kind = 'text_chunk'
   and child.parent_sha = parent.fingerprint
   and child.lane is distinct from parent.lane;
 
+-- Gamla binär-audits är inte manuella fel. De går genom den billiga
+-- path-only-kön en gång så filnamnet fortfarande lexikonmatchas.
+update github_scan_units
+set status = 'pending',
+    scan_mode = 'path_only',
+    skip_reason = coalesce(skip_reason, 'binary-content'),
+    attempt_count = 0,
+    next_attempt_at = now(),
+    locked_at = null,
+    processed_at = null,
+    last_error = null
+where status = 'audit'
+  and last_error ilike '%binär fil%';
+
 drop index if exists idx_github_scan_units_ready;
+drop index if exists idx_github_scan_units_ready_lane_fifo;
 create index if not exists idx_github_scan_units_ready_lane_fifo
-  on github_scan_units (lane, created_at)
+  on github_scan_units (lane, scan_mode, created_at)
   include (next_attempt_at)
   where status in ('pending','error') and attempt_count < 8;
+create index if not exists idx_github_scan_units_path_only_ready
+  on github_scan_units (created_at)
+  where scan_mode = 'path_only'
+    and status in ('pending','error')
+    and attempt_count < 8;
 create index if not exists idx_github_scan_units_stale
   on github_scan_units (locked_at)
   where status = 'processing';
@@ -249,6 +280,7 @@ create table if not exists github_scan_runs (
   repos_touched int not null default 0,
   units_enqueued int not null default 0,
   units_processed int not null default 0,
+  path_only_processed int not null default 0,
   github_api_calls int not null default 0,
   claude_haiku_input_tokens bigint not null default 0,
   claude_haiku_output_tokens bigint not null default 0,
@@ -261,6 +293,8 @@ create table if not exists github_scan_runs (
   baseline_units_backlog int not null default 0,
   fast_candidates_backlog int not null default 0,
   baseline_candidates_backlog int not null default 0,
+  path_only_units_backlog int not null default 0,
+  skipped_units_total int not null default 0,
   oldest_fast_age_minutes numeric not null default 0,
   oldest_baseline_age_minutes numeric not null default 0,
   run_duration_seconds int,
@@ -272,6 +306,9 @@ alter table github_scan_runs add column if not exists fast_units_backlog int not
 alter table github_scan_runs add column if not exists baseline_units_backlog int not null default 0;
 alter table github_scan_runs add column if not exists fast_candidates_backlog int not null default 0;
 alter table github_scan_runs add column if not exists baseline_candidates_backlog int not null default 0;
+alter table github_scan_runs add column if not exists path_only_processed int not null default 0;
+alter table github_scan_runs add column if not exists path_only_units_backlog int not null default 0;
+alter table github_scan_runs add column if not exists skipped_units_total int not null default 0;
 alter table github_scan_runs add column if not exists oldest_fast_age_minutes numeric not null default 0;
 alter table github_scan_runs add column if not exists oldest_baseline_age_minutes numeric not null default 0;
 alter table github_scan_runs add column if not exists run_duration_seconds int;
@@ -282,6 +319,105 @@ alter table github_scan_runs add constraint github_scan_runs_stop_reason_check
 
 create index if not exists idx_github_scan_runs_started
   on github_scan_runs (started_at desc);
+
+-- Klassificerar gammal baseline i begränsade, idempotenta batcher. Funktionen
+-- anropas även av scannern så en stor tabell aldrig kräver en massiv UPDATE.
+create or replace function classify_github_path_only_units(p_limit int default 5000)
+returns int
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_updated int;
+begin
+  with candidates as materialized (
+    select u.fingerprint,
+      case
+        when case
+          when coalesce(u.payload->>'size', '') ~ '^[0-9]+$' then (u.payload->>'size')::bigint
+          else 0
+        end > 200000 then 'size>200000'
+        when lower(coalesce(u.path, '')) ~ '(^|/)(node_modules|vendor|third_party|dist|build|out|target|coverage|__pycache__|\.venv|venv|\.next|\.nuxt|\.cache|\.turbo|\.pnpm-store|__generated__|generated)(/|$)' then 'denied-directory'
+        when lower(coalesce(u.path, '')) ~ '(^|/)(bun\.lock|cargo\.lock|composer\.lock|gemfile\.lock|go\.sum|package-lock\.json|pnpm-lock\.yaml|poetry\.lock|uv\.lock|yarn\.lock)$' then 'lockfile'
+        when lower(coalesce(u.path, '')) ~ '\.(7z|a|avi|bin|bmp|bz2|class|db|dll|dylib|eot|exe|gif|gz|ico|jpe?g|lockb|mov|mp3|mp4|o|obj|otf|parquet|pdf|png|pyc|rar|so|sqlite|svg|tar|tflite|ttf|wasm|webm|webp|woff2?|xz|zip|zst)$' then 'binary-extension'
+        else 'generated-output'
+      end as reason
+    from github_scan_units u
+    where u.lane = 'baseline'
+      and u.kind = 'deep_file'
+      and u.scan_mode = 'content'
+      and u.status in ('pending','error')
+      and (
+        (case
+          when coalesce(u.payload->>'size', '') ~ '^[0-9]+$' then (u.payload->>'size')::bigint
+          else 0
+        end > 200000)
+        or lower(coalesce(u.path, '')) ~ '(^|/)(node_modules|vendor|third_party|dist|build|out|target|coverage|__pycache__|\.venv|venv|\.next|\.nuxt|\.cache|\.turbo|\.pnpm-store|__generated__|generated)(/|$)'
+        or lower(coalesce(u.path, '')) ~ '(^|/)(bun\.lock|cargo\.lock|composer\.lock|gemfile\.lock|go\.sum|package-lock\.json|pnpm-lock\.yaml|poetry\.lock|uv\.lock|yarn\.lock)$'
+        or lower(coalesce(u.path, '')) ~ '\.(7z|a|avi|bin|bmp|bz2|class|db|dll|dylib|eot|exe|gif|gz|ico|jpe?g|lockb|mov|mp3|mp4|o|obj|otf|parquet|pdf|png|pyc|rar|so|sqlite|svg|tar|tflite|ttf|wasm|webm|webp|woff2?|xz|zip|zst)$'
+        or lower(coalesce(u.path, '')) ~ '(\.(min|bundle)\.(css|js|mjs|cjs)|\.map|(^|[._-])generated([._-]|$)|\.(designer\.cs|g\.dart|pb\.go))$'
+      )
+    order by u.created_at
+    limit greatest(p_limit, 0)
+    for update skip locked
+  ),
+  updated as (
+    update github_scan_units u
+    set scan_mode = 'path_only',
+        skip_reason = candidates.reason,
+        next_attempt_at = now()
+    from candidates
+    where u.fingerprint = candidates.fingerprint
+    returning 1
+  )
+  select count(*)::int into v_updated from updated;
+  return v_updated;
+end;
+$$;
+
+revoke all on function classify_github_path_only_units(int) from public;
+grant execute on function classify_github_path_only_units(int) to service_role;
+
+create or replace function claim_github_path_only_units(p_limit int default 5000)
+returns setof github_scan_units
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update github_scan_units
+  set status = 'error', locked_at = null, next_attempt_at = now(),
+      last_error = coalesce(last_error, 'Stale path-only lock återtagen')
+  where scan_mode = 'path_only'
+    and status = 'processing'
+    and locked_at < now() - interval '30 minutes'
+    and attempt_count < 8;
+
+  return query
+  with claimed as materialized (
+    select u.fingerprint
+    from github_scan_units u
+    where u.scan_mode = 'path_only'
+      and u.status in ('pending','error')
+      and u.next_attempt_at <= now()
+      and u.attempt_count < 8
+    order by case when u.lane = 'fast' then 0 else 1 end, u.created_at
+    limit greatest(p_limit, 0)
+    for update skip locked
+  )
+  update github_scan_units u
+  set status = 'processing',
+      locked_at = now(),
+      attempt_count = u.attempt_count + 1
+  from claimed
+  where u.fingerprint = claimed.fingerprint
+  returning u.*;
+end;
+$$;
+
+revoke all on function claim_github_path_only_units(int) from public;
+grant execute on function claim_github_path_only_units(int) to service_role;
 
 -- Atomisk claim. En avbruten worker återtas efter 30 minuter.
 drop function if exists claim_github_scan_units(int);
@@ -324,6 +460,7 @@ begin
     where u.status in ('pending','error')
       and u.next_attempt_at <= now()
       and u.attempt_count < 8
+      and u.scan_mode = 'content'
       and u.lane = case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end
     order by u.created_at
     limit greatest(p_limit, 0)
@@ -335,6 +472,7 @@ begin
     where u.status in ('pending','error')
       and u.next_attempt_at <= now()
       and u.attempt_count < 8
+      and u.scan_mode = 'content'
       and u.lane <> case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end
     order by u.created_at
     limit greatest(p_limit - (select count(*)::int from preferred), 0)
@@ -426,12 +564,15 @@ $$;
 revoke all on function claim_github_candidates(int, text) from public;
 grant execute on function claim_github_candidates(int, text) to service_role;
 
+drop function if exists get_github_backlog_metrics();
 create or replace function get_github_backlog_metrics()
 returns table (
   fast_units bigint,
   baseline_units bigint,
   fast_candidates bigint,
   baseline_candidates bigint,
+  path_only_units bigint,
+  skipped_units bigint,
   oldest_fast_minutes numeric,
   oldest_baseline_minutes numeric
 )
@@ -443,6 +584,7 @@ as $$
     select lane, created_at
     from github_scan_units
     where status in ('pending','error','processing')
+      and scan_mode = 'content'
   ),
   active_candidates as (
     select lane, created_at
@@ -453,12 +595,25 @@ as $$
     select lane, created_at from active_units
     union all
     select lane, created_at from active_candidates
+  ),
+  path_only as (
+    select count(*) as amount
+    from github_scan_units
+    where scan_mode = 'path_only'
+      and status in ('pending','error','processing')
+  ),
+  skipped as (
+    select count(*) as amount
+    from github_scan_units
+    where status = 'skipped'
   )
   select
     (select count(*) from active_units where lane = 'fast'),
     (select count(*) from active_units where lane = 'baseline'),
     (select count(*) from active_candidates where lane = 'fast'),
     (select count(*) from active_candidates where lane = 'baseline'),
+    (select amount from path_only),
+    (select amount from skipped),
     coalesce((select extract(epoch from (now() - min(created_at))) / 60 from combined where lane = 'fast'), 0),
     coalesce((select extract(epoch from (now() - min(created_at))) / 60 from combined where lane = 'baseline'), 0);
 $$;

@@ -78,13 +78,12 @@ export async function sendMorningBrief(
   return { sent, failed };
 }
 
-/** Driftfel går till maybe-kanalen så dataluckor aldrig blir tysta. */
+/** Drift har en egen kanal och får aldrig falla tillbaka till en fyndkanal. */
 export async function sendOperationalAlert(message: string): Promise<void> {
   const body = `GITHUB SCANNER — DRIFTVARNING\n\n${message.slice(0, 1800)}`;
-  const url = config.discordWebhookMaybe || config.discordWebhookUrl;
-  if (!url) {
+  if (!hasKey.discordGithubDrift()) {
     console.error(body);
     return;
   }
-  await postWebhook(url, body);
+  await postWebhook(config.discordWebhookGithubDrift, body);
 }

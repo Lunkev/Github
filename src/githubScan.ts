@@ -10,6 +10,7 @@ import {
   getTree,
   listCommitsAfter,
   listOrgRepos,
+  permalink,
   resetGithubApiCallCount,
   type CommitRef,
   type RepoRef,
@@ -22,6 +23,7 @@ import {
   type TextChunk,
 } from "./github/scan.js";
 import { extractCandidatesWithHaiku } from "./github/candidateExtractor.js";
+import { classifyGithubFile } from "./github/filePolicy.js";
 import { judgeHits } from "./github/judge.js";
 import { runScannerFixtureTests } from "./github/selftest.js";
 import {
@@ -46,8 +48,11 @@ import {
   assertQueueSchema,
   auditUnit,
   candidateFingerprint,
+  claimPathOnlyUnits,
   claimCandidates,
   claimUnits,
+  classifyQueuedPathOnly,
+  completePathOnlyUnits,
   completeUnit,
   createRun,
   enqueueUnits,
@@ -59,6 +64,7 @@ import {
   getRepoState,
   saveCandidates,
   saveRepoState,
+  skipUnit,
   unitFingerprint,
   updateRun,
   type ScanUnit,
@@ -105,6 +111,18 @@ export function buildLaneSchedule(total: number, fastPercent: number): ScanLane[
       ? "baseline"
       : "fast",
   );
+}
+
+function weekKey(now = new Date()): string {
+  const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+  return monday.toISOString().slice(0, 10);
+}
+
+export function githubFastLatencyLevel(minutes: number): "healthy" | "warning" | "critical" {
+  if (minutes >= 240) return "critical";
+  if (minutes >= 90) return "warning";
+  return "healthy";
 }
 
 function refFromFull(full: string): RepoRef {
@@ -161,6 +179,37 @@ function chunkFromUnit(unit: ScanUnit): TextChunk {
   };
 }
 
+function pathOnlyChunk(unit: ScanUnit): TextChunk {
+  const path = unit.path ?? "(unknown)";
+  const commitUrl = typeof unit.payload?.commitUrl === "string" ? unit.payload.commitUrl : undefined;
+  return {
+    repo: unit.repo,
+    path,
+    url: commitUrl ?? permalink(refFromFull(unit.repo), path, unit.commitSha),
+    mode: unit.kind === "commit_file" ? "diff" : "deep",
+    commitSha: unit.commitSha,
+    commitMessage:
+      typeof unit.payload?.commitMessage === "string" ? unit.payload.commitMessage : undefined,
+    startLine: 1,
+    text: path,
+  };
+}
+
+function pathOnlyRecords(
+  units: ScanUnit[],
+  learnedTerms: string[],
+): Parameters<typeof saveCandidates>[0] {
+  return units.flatMap((unit) =>
+    extractRuleHits([pathOnlyChunk(unit)], learnedTerms).map((hit) => ({
+      fingerprint: candidateFingerprint(unit.fingerprint, hit),
+      unitFingerprint: unit.fingerprint,
+      lane: unit.lane,
+      hit,
+      source: "rule" as const,
+    })),
+  );
+}
+
 async function expandTargets(): Promise<{ targets: string[]; newRepos: string[] }> {
   const watchlist = await getWatchlist();
   const targets = new Set<string>();
@@ -192,15 +241,20 @@ async function expandTargets(): Promise<{ targets: string[]; newRepos: string[] 
 
 async function enqueueBaseline(repo: string, ref: RepoRef, headSha: string): Promise<number> {
   const tree = await getTree(ref, headSha);
-  const units: ScanUnitInput[] = tree.map((file) => ({
-    repo,
-    kind: "deep_file",
-    lane: "baseline",
-    commitSha: headSha,
-    path: file.path,
-    blobSha: file.sha,
-    payload: { size: file.size },
-  }));
+  const units: ScanUnitInput[] = tree.map((file) => {
+    const decision = classifyGithubFile(file.path, file.size);
+    return {
+      repo,
+      kind: "deep_file",
+      lane: "baseline",
+      scanMode: decision.action,
+      skipReason: decision.reason,
+      commitSha: headSha,
+      path: file.path,
+      blobSha: file.sha,
+      payload: { size: file.size },
+    };
+  });
   let inserted = 0;
   for (let i = 0; i < units.length; i += 500) inserted += await enqueueUnits(units.slice(i, i + 500));
   await saveRepoState(repo, {
@@ -321,11 +375,15 @@ async function main() {
   const runId = await createRun(false);
   const startedAt = Date.now();
   const deadline = startedAt + config.githubRunDeadlineMinutes * 60_000;
-  const laneSchedule = buildLaneSchedule(config.githubMaxUnitsPerRun, config.githubFastLanePercent);
+  const initialBacklog = await getBacklogMetrics();
+  const effectiveFastPercent =
+    initialBacklog.oldestFastMinutes >= 90 ? 90 : config.githubFastLanePercent;
+  const laneSchedule = buildLaneSchedule(config.githubMaxUnitsPerRun, effectiveFastPercent);
   const runUsage = zeroUsage();
   const priorUsage = await getMonthlyUsage();
   let unitsEnqueued = 0;
   let unitsProcessed = 0;
+  let pathOnlyProcessed = 0;
   let unitSlotsUsed = 0;
   let findingsNew = 0;
   let stopReason: RunStopReason = "empty";
@@ -354,6 +412,39 @@ async function main() {
       }
     }
 
+    // Gammal baseline klassificeras och dräneras separat. Path-only gör bara
+    // lokal filnamnsmatchning och kan därför köras i stora, kostnadsfria batcher.
+    if (Date.now() < deadline) {
+      if ((await getState("github_path_policy_v1_complete")) !== "1") {
+        const classified = await classifyQueuedPathOnly(config.githubMaxPathOnlyPerRun);
+        if (classified < config.githubMaxPathOnlyPerRun) {
+          await setState("github_path_policy_v1_complete", "1");
+        }
+      }
+      const pathOnlyUnits = await claimPathOnlyUnits(config.githubMaxPathOnlyPerRun);
+      if (pathOnlyUnits.length > 0) {
+        try {
+          const records = pathOnlyRecords(pathOnlyUnits, learnedTerms);
+          for (let i = 0; i < records.length; i += 500) {
+            await saveCandidates(records.slice(i, i + 500));
+          }
+          for (let i = 0; i < pathOnlyUnits.length; i += 200) {
+            const batch = pathOnlyUnits.slice(i, i + 200);
+            await completePathOnlyUnits(batch.map((unit) => unit.fingerprint));
+            pathOnlyProcessed += batch.length;
+          }
+          await updateRun(runId, { pathOnlyProcessed });
+        } catch (error) {
+          await updateRun(runId, { pathOnlyProcessed });
+          warnings.push(
+            `Path-only-batch misslyckades och återtas efter stale-lock: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    }
+
     // Extraktion och Haiku körs unit-för-unit. Texten blir en egen hållbar
     // chunk-unit innan AI-anropet, så stora filer kan återupptas säkert.
     while (unitSlotsUsed < config.githubMaxUnitsPerRun && Date.now() < deadline) {
@@ -379,7 +470,11 @@ async function main() {
             unitsEnqueued += await enqueueUnits(chunkUnits.slice(i, i + 500));
           }
           const calls = getGithubApiCallCount() - beforeCalls;
-          if (extraction.auditReasons.length > 0) {
+          if (extraction.skipReason) {
+            const records = pathOnlyRecords([unit], learnedTerms);
+            await saveCandidates(records);
+            await skipUnit(unit.fingerprint, extraction.skipReason);
+          } else if (extraction.auditReasons.length > 0) {
             await auditUnit(unit, extraction.auditReasons.join("\n"), calls);
             warnings.push(...extraction.auditReasons.map((reason) => `${unit.repo}: ${reason}`));
           } else {
@@ -444,7 +539,7 @@ async function main() {
       // En claim motsvarar exakt en Sonnet-batch. Tidigare lyckade batcher
       // kvitteras därför även om nästa timmes batch skulle fallera.
       const candidateLimit = Math.min(config.githubMaxCandidatesPerRun, 40);
-      const candidateSchedule = buildLaneSchedule(candidateLimit, config.githubFastLanePercent);
+      const candidateSchedule = buildLaneSchedule(candidateLimit, effectiveFastPercent);
       const fastCandidateSlots = candidateSchedule.filter((lane) => lane === "fast").length;
       const baselineCandidateSlots = candidateLimit - fastCandidateSlots;
       const fastCandidates =
@@ -493,7 +588,8 @@ async function main() {
       backlogMetrics.fastUnits +
       backlogMetrics.baselineUnits +
       backlogMetrics.fastCandidates +
-      backlogMetrics.baselineCandidates;
+      backlogMetrics.baselineCandidates +
+      backlogMetrics.pathOnlyUnits;
     const auditCount = await getAuditCount();
     if (monthlyCost >= 50) {
       const tier = monthlyCost >= config.githubClaudeMonthlyBudgetUsd ? "budget" : "warning";
@@ -507,14 +603,8 @@ async function main() {
         await setState(key, new Date().toISOString());
       }
     }
-    if (backlog > 1000) warnings.push(`Backloggen är ${backlog}; data är sparad men alerts kan vara fördröjda.`);
     const previousLatencyLevel = (await getState("github_fast_latency_level")) ?? "healthy";
-    const latencyLevel =
-      backlogMetrics.oldestFastMinutes >= 360
-        ? "critical"
-        : backlogMetrics.oldestFastMinutes >= 120
-          ? "warning"
-          : "healthy";
+    const latencyLevel = githubFastLatencyLevel(backlogMetrics.oldestFastMinutes);
     if (latencyLevel !== previousLatencyLevel) {
       if (latencyLevel === "healthy" && previousLatencyLevel !== "healthy") {
         warnings.push(
@@ -528,7 +618,11 @@ async function main() {
       }
       await setState("github_fast_latency_level", latencyLevel);
     }
-    const stalled = unitsProcessed === 0 && backlogMetrics.fastUnits + backlogMetrics.baselineUnits > 0;
+    const stalled =
+      stopReason !== "budget" &&
+      unitsProcessed === 0 &&
+      pathOnlyProcessed === 0 &&
+      backlogMetrics.fastUnits + backlogMetrics.baselineUnits + backlogMetrics.pathOnlyUnits > 0;
     const wasStalled = (await getState("github_queue_stalled")) === "1";
     if (stalled && !wasStalled) {
       warnings.push(`Ingen scan-enhet processades trots ${backlogMetrics.fastUnits + backlogMetrics.baselineUnits} väntande.`);
@@ -536,22 +630,33 @@ async function main() {
       warnings.push("GitHub-kön processar enheter igen efter föregående driftstopp.");
     }
     await setState("github_queue_stalled", stalled ? "1" : "0");
-    const previousBacklog = Number((await getState("github_previous_backlog")) ?? backlog);
+    const fastBacklog = backlogMetrics.fastUnits + backlogMetrics.fastCandidates;
+    const previousBacklog = Number((await getState("github_previous_fast_backlog")) ?? fastBacklog);
     const previousGrowthRuns = Number((await getState("github_backlog_growth_runs")) ?? 0);
-    const growthRuns = backlog > previousBacklog ? previousGrowthRuns + 1 : 0;
+    const growthRuns = fastBacklog > previousBacklog ? previousGrowthRuns + 1 : 0;
     if (growthRuns >= 3 && previousGrowthRuns < 3) {
-      warnings.push(`GitHub-kön har vuxit ${growthRuns} körningar i rad (${previousBacklog} → ${backlog}).`);
+      warnings.push(`Fast lane har vuxit ${growthRuns} körningar i rad (${previousBacklog} → ${fastBacklog}).`);
     } else if (growthRuns === 0 && previousGrowthRuns >= 3) {
-      warnings.push(`GitHub-kön växer inte längre; backlog är ${backlog}.`);
+      warnings.push(`Fast lane växer inte längre; backlog är ${fastBacklog}.`);
     }
-    await setState("github_previous_backlog", String(backlog));
+    await setState("github_previous_fast_backlog", String(fastBacklog));
     await setState("github_backlog_growth_runs", String(growthRuns));
     const previousAuditCount = Number((await getState("github_audit_count")) ?? 0);
     if (auditCount > previousAuditCount) {
       warnings.push(
         `${auditCount} GitHub-enheter kräver manuell audit (${auditCount - previousAuditCount} nya); de är inte markerade som lyckade.`,
       );
-      await setState("github_audit_count", String(auditCount));
+    }
+    await setState("github_audit_count", String(auditCount));
+    const digestKey = `github_baseline_digest_${weekKey()}`;
+    if (!(await getState(digestKey))) {
+      warnings.push(
+        `Veckostatus: fast ${fastBacklog}; content-baseline ` +
+          `${backlogMetrics.baselineUnits + backlogMetrics.baselineCandidates}; ` +
+          `path-only kvar ${backlogMetrics.pathOnlyUnits}, klara/skippade ${backlogMetrics.skippedUnits}; ` +
+          `äkta audits ${auditCount}.`,
+      );
+      await setState(digestKey, new Date().toISOString());
     }
     if (warnings.length > 0) await sendOperationalAlert(warnings.slice(0, 20).join("\n"));
 
@@ -560,6 +665,7 @@ async function main() {
       reposTouched: targets.length,
       unitsEnqueued,
       unitsProcessed,
+      pathOnlyProcessed,
       githubApiCalls: getGithubApiCallCount(),
       usage: runUsage,
       findingsNew,
@@ -572,29 +678,34 @@ async function main() {
     });
     await setState("last_github_run", new Date().toISOString());
     console.log(
-      `Klart: ${unitsEnqueued} köade, ${unitsProcessed} processade, ` +
+      `Klart: ${unitsEnqueued} köade, ${unitsProcessed} content + ${pathOnlyProcessed} path-only processade, ` +
         `fast ${backlogMetrics.fastUnits + backlogMetrics.fastCandidates} (${Math.round(backlogMetrics.oldestFastMinutes)} min), ` +
         `baseline ${backlogMetrics.baselineUnits + backlogMetrics.baselineCandidates} (${Math.round(backlogMetrics.oldestBaselineMinutes)} min), ` +
+        `path-only ${backlogMetrics.pathOnlyUnits}, ` +
         `stopp ${stopReason}, AI $${estimateClaudeCost(runUsage).toFixed(4)}.`,
     );
   } catch (error) {
+    const fatalMessage = error instanceof Error ? error.message : String(error);
     const backlogMetrics = await getBacklogMetrics().catch(() => undefined);
     const backlog = backlogMetrics
       ? backlogMetrics.fastUnits +
         backlogMetrics.baselineUnits +
         backlogMetrics.fastCandidates +
-        backlogMetrics.baselineCandidates
+        backlogMetrics.baselineCandidates +
+        backlogMetrics.pathOnlyUnits
       : undefined;
     await updateRun(runId, {
       finishedAt: new Date().toISOString(),
       githubApiCalls: getGithubApiCallCount(),
       usage: runUsage,
+      pathOnlyProcessed,
       backlogRemaining: backlog,
       backlog: backlogMetrics,
       runDurationSeconds: Math.round((Date.now() - startedAt) / 1000),
       stopReason: "error",
-      error: error instanceof Error ? error.message : String(error),
+      error: fatalMessage,
     });
+    await sendOperationalAlert(`Fatal körning: ${fatalMessage}`).catch(() => undefined);
     throw error;
   }
 }
@@ -680,6 +791,37 @@ async function runSelfTests(): Promise<void> {
   const drainingBaseline = Array.from({ length: 12 }, (_, index) => 10_000 + index);
   simulateClaims(continuousFast, drainingBaseline, [...schedule, ...schedule, ...schedule]);
   assert.equal(drainingBaseline.length, 0);
+  assert.equal(buildLaneSchedule(30, 65).filter((lane) => lane === "fast").length, 20);
+  assert.equal(buildLaneSchedule(30, 90).filter((lane) => lane === "fast").length, 27);
+  assert.equal(githubFastLatencyLevel(89), "healthy");
+  assert.equal(githubFastLatencyLevel(90), "warning");
+  assert.equal(githubFastLatencyLevel(239), "warning");
+  assert.equal(githubFastLatencyLevel(240), "critical");
+  assert.equal(weekKey(new Date("2026-09-03T12:00:00Z")), "2026-08-31");
+
+  const pathOnlyCases = [
+    ["fixtures/fee.bin", 20],
+    ["schema/app.json.zst", 20],
+    ["node_modules/pkg/README.md", 20],
+    ["vendor/pkg/source.ts", 20],
+    ["dist/app.min.js", 20],
+    ["package-lock.json", 20],
+    ["src/generated/client.ts", 20],
+    ["src/huge.ts", 200_001],
+  ] as const;
+  for (const [path, size] of pathOnlyCases) {
+    assert.equal(classifyGithubFile(path, size).action, "path_only", path);
+  }
+  for (const path of [
+    "src/main.ts",
+    "docs/egg.md",
+    "config/app.yaml",
+    "tests/mascot.test.ts",
+    "examples/token.json",
+    "Dockerfile",
+  ]) {
+    assert.equal(classifyGithubFile(path, 20).action, "content", path);
+  }
 
   const fastParent: ScanUnit = {
     ...commitUnit("owner/repo", {
@@ -701,6 +843,24 @@ async function runSelfTests(): Promise<void> {
     0,
   );
   assert.equal(inheritedBaseline.lane, "baseline");
+  const pathUnit: ScanUnit = {
+    repo: "owner/repo",
+    kind: "deep_file",
+    lane: "baseline",
+    scanMode: "path_only",
+    skipReason: "binary-extension:bin",
+    commitSha: "abc",
+    path: "fixtures/test-dog.bin",
+    blobSha: "blob",
+    payload: {},
+    fingerprint: "path-parent",
+    status: "processing",
+    attemptCount: 1,
+  };
+  const pathRecords = pathOnlyRecords([pathUnit], []);
+  assert.equal(pathRecords.length, 1);
+  assert.equal(pathRecords[0].source, "rule");
+  assert.equal(pathRecords[0].hit.line, "fixtures/test-dog.bin");
 
   const queueSchema = await readFile(new URL("../supabase/schema.sql", import.meta.url), "utf8");
   assert.match(queueSchema, /for update skip locked/i);
@@ -710,9 +870,18 @@ async function runSelfTests(): Promise<void> {
   assert.match(queueSchema, /idx_github_scan_units_ready_lane_fifo/i);
   assert.match(queueSchema, /with preferred as materialized/i);
   assert.match(queueSchema, /fallback as materialized/i);
+  assert.match(queueSchema, /claim_github_path_only_units/i);
+  assert.match(queueSchema, /classify_github_path_only_units/i);
+  assert.match(queueSchema, /idx_github_scan_units_path_only_ready/i);
+  assert.match(queueSchema, /scan_mode = 'content'/i);
+  assert.match(queueSchema, /'skipped'/i);
+  assert.doesNotMatch(queueSchema, /delete\s+from\s+github_scan_units/i);
+  const alertSource = await readFile(new URL("./github/alert.ts", import.meta.url), "utf8");
+  assert.match(alertSource, /discordWebhookGithubDrift/);
+  assert.doesNotMatch(alertSource.slice(alertSource.indexOf("sendOperationalAlert")), /discordWebhookMaybe/);
 
   await runScannerFixtureTests();
-  console.log("github:selftest OK — lane-arv, 16/4, fallback, FIFO, anti-starvation, retries och stale locks.");
+  console.log("github:selftest OK — filpolicy, path-only, adaptiva lanes, FIFO, retries och stale locks.");
 }
 
 (SELFTEST ? runSelfTests() : main())

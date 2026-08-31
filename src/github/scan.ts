@@ -6,6 +6,7 @@ import {
   type CommitFile,
   type RepoRef,
 } from "./api.js";
+import { classifyGithubFile } from "./filePolicy.js";
 import { matchLexicon, type LexiconHit } from "./lexicon.js";
 import type { ScanUnit, ScanUnitInput } from "./unitStore.js";
 
@@ -37,6 +38,7 @@ export interface UnitExtraction {
   chunks: TextChunk[];
   auditReasons: string[];
   childUnits: ScanUnitInput[];
+  skipReason?: string;
 }
 
 function refFromRepo(repo: string): RepoRef {
@@ -92,9 +94,10 @@ async function fullFileFallback(
   unit: ScanUnit,
   file: CommitFile,
   commitMessage: string,
-): Promise<{ chunks: TextChunk[]; audits: string[] }> {
+): Promise<{ chunks: TextChunk[]; audits: string[]; skippedBinary: boolean }> {
   const chunks: TextChunk[] = [];
   const audits: string[] = [];
+  let skippedBinary = false;
   const common = {
     repo: unit.repo,
     mode: "diff" as const,
@@ -106,7 +109,7 @@ async function fullFileFallback(
   if (file.status !== "added" && unit.parentSha) {
     const before = await getFileContentAt(ref, beforePath, unit.parentSha);
     if (before.missing) audits.push(`${beforePath}: förväntad before-version saknas`);
-    else if (before.binary) audits.push(`${beforePath}: binär fil före commit`);
+    else if (before.binary) skippedBinary = true;
     else {
       chunks.push(
         ...chunkText(before.text, {
@@ -120,7 +123,7 @@ async function fullFileFallback(
   if (file.status !== "removed") {
     const after = await getFileContentAt(ref, file.filename, unit.commitSha);
     if (after.missing) audits.push(`${file.filename}: förväntad after-version saknas`);
-    else if (after.binary) audits.push(`${file.filename}: binär fil efter commit`);
+    else if (after.binary) skippedBinary = true;
     else {
       chunks.push(
         ...chunkText(after.text, {
@@ -131,16 +134,21 @@ async function fullFileFallback(
       );
     }
   }
-  return { chunks, audits };
+  return { chunks, audits, skippedBinary };
 }
 
 /** Läser exakt en hållbar köenhet. Fel kastas så enheten stannar i retry-kön. */
 export async function extractUnit(unit: ScanUnit): Promise<UnitExtraction> {
+  if (unit.scanMode === "path_only") {
+    return { chunks: [], auditReasons: [], childUnits: [], skipReason: unit.skipReason ?? "path-only policy" };
+  }
   const ref = refFromRepo(unit.repo);
   if (unit.kind === "deep_file") {
     if (!unit.path || !unit.blobSha) throw new Error(`deep_file saknar path/blob_sha: ${unit.fingerprint}`);
     const blob = await getBlobText(ref, unit.blobSha);
-    if (blob.binary) return { chunks: [], auditReasons: [`${unit.path}: binär fil`], childUnits: [] };
+    if (blob.binary) {
+      return { chunks: [], auditReasons: [], childUnits: [], skipReason: "binary-content" };
+    }
     return {
       chunks: chunkText(blob.text, {
         repo: unit.repo,
@@ -178,6 +186,9 @@ export async function extractUnit(unit: ScanUnit): Promise<UnitExtraction> {
     }
     const fallback = await fullFileFallback(ref, unit, file, commitMessage);
     if (fallback.chunks.length === 0 && fallback.audits.length === 0) {
+      if (fallback.skippedBinary) {
+        return { chunks: [], auditReasons: [], childUnits: [], skipReason: "binary-content" };
+      }
       fallback.audits.push(`${file.filename}: patch saknas/trunkerad och filinnehåll var tomt`);
     }
     return { chunks: fallback.chunks, auditReasons: fallback.audits, childUnits: [] };
@@ -209,10 +220,13 @@ export async function extractUnit(unit: ScanUnit): Promise<UnitExtraction> {
         },
       ),
     );
+    const decision = classifyGithubFile(file.filename);
     childUnits.push({
       repo: unit.repo,
       kind: "commit_file",
       lane: unit.lane,
+      scanMode: decision.action,
+      skipReason: decision.reason,
       commitSha: unit.commitSha,
       parentSha: details.parentSha,
       path: file.filename,
