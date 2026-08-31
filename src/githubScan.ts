@@ -873,6 +873,8 @@ async function runSelfTests(): Promise<void> {
   assert.match(queueSchema, /claim_github_path_only_units/i);
   assert.match(queueSchema, /classify_github_path_only_units/i);
   assert.match(queueSchema, /idx_github_scan_units_path_only_ready/i);
+  assert.match(queueSchema, /idx_github_scan_units_unclassified/i);
+  assert.match(queueSchema, /classification_version = 1/i);
   assert.match(queueSchema, /scan_mode = 'content'/i);
   assert.match(queueSchema, /'skipped'/i);
   assert.doesNotMatch(queueSchema, /delete\s+from\s+github_scan_units/i);

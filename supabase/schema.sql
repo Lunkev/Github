@@ -142,6 +142,7 @@ create table if not exists github_scan_units (
   payload jsonb not null default '{}'::jsonb,
   scan_mode text not null default 'content'
     check (scan_mode in ('content','path_only')),
+  classification_version int not null default 0,
   skip_reason text,
   status text not null default 'pending'
     check (status in ('pending','processing','done','error','audit','skipped')),
@@ -160,6 +161,7 @@ alter table github_scan_units add constraint github_scan_units_kind_check
   check (kind in ('commit','commit_file','deep_file','text_chunk'));
 alter table github_scan_units add column if not exists lane text not null default 'baseline';
 alter table github_scan_units add column if not exists scan_mode text not null default 'content';
+alter table github_scan_units add column if not exists classification_version int not null default 0;
 alter table github_scan_units add column if not exists skip_reason text;
 alter table github_scan_units drop constraint if exists github_scan_units_lane_check;
 alter table github_scan_units add constraint github_scan_units_lane_check
@@ -184,6 +186,13 @@ from github_scan_units as parent
 where child.kind = 'text_chunk'
   and child.parent_sha = parent.fingerprint
   and child.lane is distinct from parent.lane;
+update github_scan_units
+set classification_version = 1
+where classification_version < 1
+  and (lane = 'fast' or kind <> 'deep_file');
+-- Befintliga baseline-filer behåller version 0 för batchmigreringen; alla
+-- nyköade rader är redan klassificerade av applikationen.
+alter table github_scan_units alter column classification_version set default 1;
 
 -- Gamla binär-audits är inte manuella fel. De går genom den billiga
 -- path-only-kön en gång så filnamnet fortfarande lexikonmatchas.
@@ -204,12 +213,20 @@ drop index if exists idx_github_scan_units_ready_lane_fifo;
 create index if not exists idx_github_scan_units_ready_lane_fifo
   on github_scan_units (lane, scan_mode, created_at)
   include (next_attempt_at)
-  where status in ('pending','error') and attempt_count < 8;
+  where status in ('pending','error')
+    and attempt_count < 8
+    and classification_version >= 1;
 create index if not exists idx_github_scan_units_path_only_ready
   on github_scan_units (created_at)
   where scan_mode = 'path_only'
     and status in ('pending','error')
     and attempt_count < 8;
+create index if not exists idx_github_scan_units_unclassified
+  on github_scan_units (created_at)
+  where lane = 'baseline'
+    and kind = 'deep_file'
+    and classification_version < 1
+    and status in ('pending','error');
 create index if not exists idx_github_scan_units_stale
   on github_scan_units (locked_at)
   where status = 'processing';
@@ -334,6 +351,7 @@ begin
   with candidates as materialized (
     select u.fingerprint,
       case
+        when u.scan_mode = 'path_only' then coalesce(u.skip_reason, 'path-only')
         when case
           when coalesce(u.payload->>'size', '') ~ '^[0-9]+$' then (u.payload->>'size')::bigint
           else 0
@@ -341,31 +359,23 @@ begin
         when lower(coalesce(u.path, '')) ~ '(^|/)(node_modules|vendor|third_party|dist|build|out|target|coverage|__pycache__|\.venv|venv|\.next|\.nuxt|\.cache|\.turbo|\.pnpm-store|__generated__|generated)(/|$)' then 'denied-directory'
         when lower(coalesce(u.path, '')) ~ '(^|/)(bun\.lock|cargo\.lock|composer\.lock|gemfile\.lock|go\.sum|package-lock\.json|pnpm-lock\.yaml|poetry\.lock|uv\.lock|yarn\.lock)$' then 'lockfile'
         when lower(coalesce(u.path, '')) ~ '\.(7z|a|avi|bin|bmp|bz2|class|db|dll|dylib|eot|exe|gif|gz|ico|jpe?g|lockb|mov|mp3|mp4|o|obj|otf|parquet|pdf|png|pyc|rar|so|sqlite|svg|tar|tflite|ttf|wasm|webm|webp|woff2?|xz|zip|zst)$' then 'binary-extension'
-        else 'generated-output'
+        when lower(coalesce(u.path, '')) ~ '(\.(min|bundle)\.(css|js|mjs|cjs)|\.map|(^|[._-])generated([._-]|$)|\.(designer\.cs|g\.dart|pb\.go))$' then 'generated-output'
+        else null
       end as reason
     from github_scan_units u
     where u.lane = 'baseline'
       and u.kind = 'deep_file'
-      and u.scan_mode = 'content'
+      and u.classification_version < 1
       and u.status in ('pending','error')
-      and (
-        (case
-          when coalesce(u.payload->>'size', '') ~ '^[0-9]+$' then (u.payload->>'size')::bigint
-          else 0
-        end > 200000)
-        or lower(coalesce(u.path, '')) ~ '(^|/)(node_modules|vendor|third_party|dist|build|out|target|coverage|__pycache__|\.venv|venv|\.next|\.nuxt|\.cache|\.turbo|\.pnpm-store|__generated__|generated)(/|$)'
-        or lower(coalesce(u.path, '')) ~ '(^|/)(bun\.lock|cargo\.lock|composer\.lock|gemfile\.lock|go\.sum|package-lock\.json|pnpm-lock\.yaml|poetry\.lock|uv\.lock|yarn\.lock)$'
-        or lower(coalesce(u.path, '')) ~ '\.(7z|a|avi|bin|bmp|bz2|class|db|dll|dylib|eot|exe|gif|gz|ico|jpe?g|lockb|mov|mp3|mp4|o|obj|otf|parquet|pdf|png|pyc|rar|so|sqlite|svg|tar|tflite|ttf|wasm|webm|webp|woff2?|xz|zip|zst)$'
-        or lower(coalesce(u.path, '')) ~ '(\.(min|bundle)\.(css|js|mjs|cjs)|\.map|(^|[._-])generated([._-]|$)|\.(designer\.cs|g\.dart|pb\.go))$'
-      )
     order by u.created_at
     limit greatest(p_limit, 0)
     for update skip locked
   ),
   updated as (
     update github_scan_units u
-    set scan_mode = 'path_only',
+    set scan_mode = case when candidates.reason is null then 'content' else 'path_only' end,
         skip_reason = candidates.reason,
+        classification_version = 1,
         next_attempt_at = now()
     from candidates
     where u.fingerprint = candidates.fingerprint
@@ -461,6 +471,7 @@ begin
       and u.next_attempt_at <= now()
       and u.attempt_count < 8
       and u.scan_mode = 'content'
+      and u.classification_version >= 1
       and u.lane = case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end
     order by u.created_at
     limit greatest(p_limit, 0)
@@ -473,6 +484,7 @@ begin
       and u.next_attempt_at <= now()
       and u.attempt_count < 8
       and u.scan_mode = 'content'
+      and u.classification_version >= 1
       and u.lane <> case when p_preferred_lane = 'baseline' then 'baseline' else 'fast' end
     order by u.created_at
     limit greatest(p_limit - (select count(*)::int from preferred), 0)

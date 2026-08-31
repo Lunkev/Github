@@ -151,7 +151,7 @@ export async function assertQueueSchema(): Promise<void> {
   if (!d) throw new Error("SUPABASE_URL och SUPABASE_SERVICE_KEY krävs för förlustfri GitHub-kö.");
   const { error } = await d
     .from("github_scan_units")
-    .select("fingerprint,lane,scan_mode,skip_reason")
+    .select("fingerprint,lane,scan_mode,classification_version,skip_reason")
     .limit(1);
   if (error) throw missingSchema(error.message);
 }
@@ -199,6 +199,7 @@ export async function enqueueUnits(units: ScanUnitInput[]): Promise<number> {
     blob_sha: unit.blobSha ?? null,
     lane: unit.lane,
     scan_mode: unit.scanMode ?? "content",
+    classification_version: 1,
     skip_reason: unit.skipReason ?? null,
     payload: unit.payload ?? {},
   }));
