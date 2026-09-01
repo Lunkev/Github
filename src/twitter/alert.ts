@@ -26,6 +26,7 @@ export function formatTwitterAlert(origin: TwitterOrigin): string {
 
 export async function sendTwitterAlert(origin: TwitterOrigin): Promise<boolean> {
   if (!hasKey.discordTwitter()) return false;
+  if (ageHours(origin) > config.twitterMaxAgeHours) return false;
   return postWebhook(config.discordWebhookTwitter, formatTwitterAlert(origin));
 }
 

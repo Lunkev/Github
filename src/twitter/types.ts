@@ -67,6 +67,10 @@ export interface TwitterRunMetrics {
   emptyTwitterCalls: number;
   returnedTweets: number;
   originsSaved: number;
+  originsWatching: number;
+  originsImmediate: number;
+  originsConfirmed: number;
+  originsExpired: number;
   originsJudged: number;
   postsWritten: number;
   alertsSent: number;

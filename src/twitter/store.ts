@@ -51,7 +51,14 @@ function mapTweet(row: Record<string, unknown>): TwitterOrigin {
 export async function assertTwitterSchema(): Promise<void> {
   const d = db();
   if (!d) throw new Error("Twitter-scannern kräver Supabase service_role.");
-  const { error } = await d.from("twitter_queries").select("id").limit(1);
+  const [queries, runs] = await Promise.all([
+    d.from("twitter_queries").select("id").limit(1),
+    d
+      .from("twitter_scan_runs")
+      .select("origins_watching,origins_immediate,origins_confirmed,origins_expired")
+      .limit(1),
+  ]);
+  const error = queries.error ?? runs.error;
   if (error) throw new Error(`${error.message}. Kör senaste supabase/schema.sql.`);
 }
 
@@ -356,15 +363,33 @@ export async function failOrigin(origin: TwitterOrigin, stage: "judge" | "writer
 export async function getReadyAlerts(limit = 6): Promise<TwitterOrigin[]> {
   const d = db();
   if (!d) return [];
+  const cutoff = new Date(Date.now() - config.twitterMaxAgeHours * 3_600_000).toISOString();
   const { data, error } = await d
     .from("twitter_origins")
     .select("*")
     .eq("status", "approved")
     .not("ready_post", "is", null)
+    .gte("tweet_created_at", cutoff)
     .order("inserted_at")
     .limit(limit);
   if (error) return [];
   return (data ?? []).map((row) => mapTweet(row as Record<string, unknown>));
+}
+
+export async function expireOldOrigins(now = new Date()): Promise<number> {
+  const d = db();
+  if (!d) return 0;
+  const cutoff = new Date(now.getTime() - config.twitterMaxAgeHours * 3_600_000).toISOString();
+  const expired = new Set<string>();
+  const terminal = await d
+    .from("twitter_origins")
+    .update({ status: "skipped", locked_at: null, last_error: null, updated_at: now.toISOString() })
+    .in("status", ["watching", "pending", "judging", "approved", "writing", "error"])
+    .lt("tweet_created_at", cutoff)
+    .select("tweet_id");
+  if (terminal.error) throw new Error(`expire twitter origins: ${terminal.error.message}`);
+  for (const row of terminal.data ?? []) expired.add(String(row.tweet_id));
+  return expired.size;
 }
 
 export async function markAlerted(origin: TwitterOrigin): Promise<void> {
@@ -435,6 +460,10 @@ export async function checkpointRun(id: number, metrics: TwitterRunMetrics): Pro
       empty_twitter_calls: metrics.emptyTwitterCalls,
       returned_tweets: metrics.returnedTweets,
       origins_saved: metrics.originsSaved,
+      origins_watching: metrics.originsWatching,
+      origins_immediate: metrics.originsImmediate,
+      origins_confirmed: metrics.originsConfirmed,
+      origins_expired: metrics.originsExpired,
       origins_judged: metrics.originsJudged,
       posts_written: metrics.postsWritten,
       alerts_sent: metrics.alertsSent,
@@ -463,6 +492,10 @@ export async function finishRun(id: number, metrics: TwitterRunMetrics, patch: {
     empty_twitter_calls: metrics.emptyTwitterCalls,
     returned_tweets: metrics.returnedTweets,
     origins_saved: metrics.originsSaved,
+    origins_watching: metrics.originsWatching,
+    origins_immediate: metrics.originsImmediate,
+    origins_confirmed: metrics.originsConfirmed,
+    origins_expired: metrics.originsExpired,
     origins_judged: metrics.originsJudged,
     posts_written: metrics.postsWritten,
     alerts_sent: metrics.alertsSent,

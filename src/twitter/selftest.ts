@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { config } from "../config.js";
 import { formatTwitterAlert } from "./alert.js";
 import { buildAdvancedQuery, normalizeTweet } from "./api.js";
 import { parseTwitterExample, selectRelevantExamples } from "./examples.js";
-import { isEligibleOrigin } from "./filter.js";
+import { classifyOriginEligibility, isEligibleOrigin } from "./filter.js";
 import { advancedSearchFixture, multilingualTweets, tweetFixture } from "./fixtures.js";
 import { resolveOrigin } from "./origin.js";
 import { estimateClaudeCost, estimateTwitterCost } from "./store.js";
@@ -56,6 +57,39 @@ async function main(): Promise<void> {
   };
   assert.equal(effectiveVelocity(40_000, 16_000), 16_000);
   assert.equal(isEligibleOrigin(origin), true);
+
+  const now = new Date("2026-09-01T12:00:00Z");
+  const hybridBase: TwitterOrigin = {
+    ...origin,
+    createdAt: new Date(now.getTime() - 30 * 60_000).toISOString(),
+    viewCount: config.twitterMinViews,
+    approximateVelocity: config.twitterMinViewsPerHour * 1.5,
+    observedVelocity: null,
+  };
+  assert.equal(classifyOriginEligibility(hybridBase, now), "watching");
+  assert.equal(
+    classifyOriginEligibility({
+      ...hybridBase,
+      viewCount: config.twitterMinViews * config.twitterImmediateMultiplier,
+      approximateVelocity: config.twitterMinViewsPerHour * config.twitterImmediateMultiplier,
+    }, now),
+    "immediate",
+  );
+  assert.equal(
+    classifyOriginEligibility({
+      ...hybridBase,
+      observedVelocity: config.twitterMinViewsPerHour,
+    }, now),
+    "confirmed",
+  );
+  assert.equal(
+    classifyOriginEligibility({
+      ...hybridBase,
+      createdAt: new Date(now.getTime() - (config.twitterMaxAgeHours * 60 + 1) * 60_000).toISOString(),
+      observedVelocity: config.twitterMinViewsPerHour * 10,
+    }, now),
+    "ineligible",
+  );
 
   const exampleContent = [
     "ORIGIN:",
@@ -110,17 +144,23 @@ async function main(): Promise<void> {
   assert.match(schema, /writer_attempt_count >= 8/i);
   assert.match(schema, /create table if not exists twitter_discoveries/i);
   assert.match(schema, /create or replace function claim_twitter_discoveries/i);
+  assert.match(schema, /origins_immediate int not null default 0/i);
+  assert.match(schema, /origins_confirmed int not null default 0/i);
   const apiSource = await readFile(new URL("./api.ts", import.meta.url), "utf8");
   assert.match(apiSource, /queryType: "Top"/);
   const runtimeSource = await readFile(new URL("../twitterScan.ts", import.meta.url), "utf8");
   assert.match(runtimeSource, /reserveDiscoveries/);
   assert.match(runtimeSource, /checkpointRun/);
+  assert.match(runtimeSource, /expireOldOrigins/);
+  const configSource = await readFile(new URL("../config.ts", import.meta.url), "utf8");
+  assert.match(configSource, /TWITTER_MAX_AGE_HOURS, 4/);
+  assert.match(configSource, /TWITTER_MIN_VIEWS, 5_000/);
   const judgeSource = await readFile(new URL("./judge.ts", import.meta.url), "utf8");
   const writerSource = await readFile(new URL("./writer.ts", import.meta.url), "utf8");
   assert.doesNotMatch(judgeSource, /selectRelevantExamples/);
   assert.match(writerSource, /TwitterExample/);
 
-  console.log("twitter:selftest OK — API, flerspråkigt, origin, velocity, rotation, retry, judge/writer och alert.");
+  console.log("twitter:selftest OK — 4h freshness, hybrid velocity, origin, rotation, retry, judge/writer och alert.");
 }
 
 main().catch((error) => {

@@ -810,6 +810,10 @@ create table if not exists twitter_scan_runs (
   empty_twitter_calls int not null default 0,
   returned_tweets int not null default 0,
   origins_saved int not null default 0,
+  origins_watching int not null default 0,
+  origins_immediate int not null default 0,
+  origins_confirmed int not null default 0,
+  origins_expired int not null default 0,
   origins_judged int not null default 0,
   posts_written int not null default 0,
   alerts_sent int not null default 0,
@@ -824,6 +828,10 @@ create table if not exists twitter_scan_runs (
   error text
 );
 alter table twitter_scan_runs add column if not exists empty_twitter_calls int not null default 0;
+alter table twitter_scan_runs add column if not exists origins_watching int not null default 0;
+alter table twitter_scan_runs add column if not exists origins_immediate int not null default 0;
+alter table twitter_scan_runs add column if not exists origins_confirmed int not null default 0;
+alter table twitter_scan_runs add column if not exists origins_expired int not null default 0;
 
 create table if not exists twitter_runtime_lock (
   singleton boolean primary key default true check (singleton),

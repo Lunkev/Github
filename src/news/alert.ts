@@ -2,8 +2,11 @@ import { config, hasKey } from "../config.js";
 import { postWebhook } from "../discord/webhook.js";
 import type { NewsArticle, NewsCandidate } from "./types.js";
 
-const ALERT_THRESHOLD = 65;
-const MAX_ALERTS = 5;
+const MAX_ALERTS = 3;
+
+export function newsAlertThreshold(category: string): number {
+  return category.trim().toLowerCase() === "animal" ? 65 : 85;
+}
 
 function ticker(value: string): string {
   const clean = value.trim();
@@ -40,7 +43,9 @@ export async function sendNewsAlerts(
 ): Promise<Set<string>> {
   const alerted = new Set<string>();
   const articleByFingerprint = new Map(articles.map((article) => [article.fingerprint, article]));
-  const selected = candidates.filter((candidate) => candidate.score >= ALERT_THRESHOLD).slice(0, MAX_ALERTS);
+  const selected = candidates
+    .filter((candidate) => candidate.score >= newsAlertThreshold(candidate.category))
+    .slice(0, MAX_ALERTS);
 
   if (!hasKey.discordNews()) {
     if (selected.length > 0) console.error("Ingen DISCORD_WEBHOOK_NEWS — postar inte news-fynd.");

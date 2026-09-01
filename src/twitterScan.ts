@@ -4,7 +4,7 @@ import { getState, setState } from "./db/githubStore.js";
 import { sendTwitterAlert, sendTwitterDrift } from "./twitter/alert.js";
 import { lookupTweets, searchTweets } from "./twitter/api.js";
 import { ingestTwitterExamples, selectRelevantExamples } from "./twitter/examples.js";
-import { isEligibleOrigin, passesCheapFilter, rankOrigins } from "./twitter/filter.js";
+import { classifyOriginEligibility, passesCheapFilter, rankOrigins } from "./twitter/filter.js";
 import { ingestTwitterWatchlist } from "./twitter/ingest.js";
 import { judgeOrigins } from "./twitter/judge.js";
 import { resolveOrigin } from "./twitter/origin.js";
@@ -20,6 +20,7 @@ import {
   createRun,
   estimateClaudeCost,
   estimateTwitterCost,
+  expireOldOrigins,
   failDiscovery,
   failOrigin,
   finishRun,
@@ -57,6 +58,10 @@ function emptyMetrics(): TwitterRunMetrics {
     emptyTwitterCalls: 0,
     returnedTweets: 0,
     originsSaved: 0,
+    originsWatching: 0,
+    originsImmediate: 0,
+    originsConfirmed: 0,
+    originsExpired: 0,
     originsJudged: 0,
     postsWritten: 0,
     alertsSent: 0,
@@ -174,7 +179,16 @@ async function main(): Promise<void> {
           const saved = await saveOrigins([resolved.origin], discovery.queryId);
           metrics.originsSaved += saved.inserted;
           resolved.origin.observedVelocity = saved.velocities.get(resolved.origin.id) ?? null;
-          if (isEligibleOrigin(resolved.origin)) await promoteEligible([resolved.origin.id]);
+          const eligibility = classifyOriginEligibility(resolved.origin);
+          if (eligibility === "immediate") {
+            metrics.originsImmediate++;
+            await promoteEligible([resolved.origin.id]);
+          } else if (eligibility === "confirmed") {
+            metrics.originsConfirmed++;
+            await promoteEligible([resolved.origin.id]);
+          } else if (eligibility === "watching") {
+            metrics.originsWatching++;
+          }
         }
         await completeDiscovery(discovery.tweet.id);
       }
@@ -209,7 +223,16 @@ async function main(): Promise<void> {
           const eligible: string[] = [];
           for (const origin of origins) {
             origin.observedVelocity = saved.velocities.get(origin.id) ?? null;
-            if (isEligibleOrigin(origin)) eligible.push(origin.id);
+            const eligibility = classifyOriginEligibility(origin);
+            if (eligibility === "confirmed") {
+              metrics.originsConfirmed++;
+              eligible.push(origin.id);
+            } else if (eligibility === "immediate") {
+              metrics.originsImmediate++;
+              eligible.push(origin.id);
+            } else if (eligibility === "watching") {
+              metrics.originsWatching++;
+            }
           }
           await promoteEligible(eligible);
         }
@@ -218,6 +241,7 @@ async function main(): Promise<void> {
       stopReason = "twitter_budget";
     }
 
+    metrics.originsExpired += await expireOldOrigins();
     projectedClaudeCost = monthly.claude + estimateClaudeCost(metrics.usage.input, metrics.usage.output);
     if (
       projectedClaudeCost + JUDGE_CALL_RESERVE_USD <= config.twitterMonthlyClaudeBudgetUsd &&
@@ -241,6 +265,7 @@ async function main(): Promise<void> {
       stopReason = Date.now() >= deadline ? "deadline" : "claude_budget";
     }
 
+    metrics.originsExpired += await expireOldOrigins();
     const examples = await getExamples();
     while (
       Date.now() < deadline &&
@@ -260,6 +285,7 @@ async function main(): Promise<void> {
       metrics.postsWritten++;
     }
 
+    metrics.originsExpired += await expireOldOrigins();
     for (const origin of await getReadyAlerts(6)) {
       if (!(await sendTwitterAlert(origin))) break;
       await markAlerted(origin);
@@ -304,6 +330,8 @@ async function main(): Promise<void> {
     await finishRun(runId, metrics, { stopReason, startedAt });
     console.log(
       `Klart: ${metrics.searchCalls} searches, ${metrics.returnedTweets} tweets, ` +
+        `${metrics.originsImmediate} direct, ${metrics.originsConfirmed} confirmed, ` +
+        `${metrics.originsWatching} watching, ${metrics.originsExpired} expired, ` +
         `${metrics.originsJudged} judged, ${metrics.alertsSent} alerts, backlog ${backlog.count}, ` +
         `X $${runTwitterCost(metrics).toFixed(4)}, ` +
         `Claude $${estimateClaudeCost(metrics.usage.input, metrics.usage.output).toFixed(4)}.`,

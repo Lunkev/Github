@@ -1,5 +1,5 @@
 import { config, hasKey } from "./config.js";
-import { formatNewsPlay, sendNewsAlerts } from "./news/alert.js";
+import { formatNewsPlay, newsAlertThreshold, sendNewsAlerts } from "./news/alert.js";
 import {
   enrichArticle,
   fetchGoogleNews,
@@ -115,7 +115,9 @@ function selftest(): number {
     exactPost &&
     stableExampleDedup &&
     retrievalOk &&
-    outputOk;
+    outputOk &&
+    newsAlertThreshold("animal") === 65 &&
+    newsAlertThreshold("politics") === 85;
   console.log(ok ? "news selftest OK" : "news selftest FAILED");
   return ok ? 0 : 1;
 }

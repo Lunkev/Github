@@ -240,8 +240,10 @@ Pump-servicen redan använder krediten. Claude-kostnaden är oförändrad.
    - `CHANNEL_TWITTER_EXAMPLES_ID`
    - `DISCORD_WEBHOOK_TWITTER`
    - `DISCORD_WEBHOOK_TWITTER_DRIFT`
-4. Defaults är sex frågor/körning, 12 timmar, 8 000 views, 15 000 views/timme,
-   $40 TwitterAPI.io och $20 Claude per månad. Se `.env.example` för overrides.
+4. Defaults är sex frågor/körning, max 4 timmar, minst 5 000 views och 15 000
+   uppmätta views/timme. Utan en andra mätning krävs 2× båda gränserna för
+   direkt judge. Budgetarna är $40 TwitterAPI.io och $20 Claude per månad.
+   Se `.env.example` för overrides.
 
 ### Railway
 

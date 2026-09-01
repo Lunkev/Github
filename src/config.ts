@@ -65,9 +65,10 @@ export const config = {
 
   twitterQueriesPerRun: Math.min(6, Math.floor(positiveNumber(process.env.TWITTER_QUERIES_PER_RUN, 6))),
   twitterMaxCandidatesPerRun: Math.min(6, Math.floor(positiveNumber(process.env.TWITTER_MAX_CANDIDATES_PER_RUN, 6))),
-  twitterMaxAgeHours: positiveNumber(process.env.TWITTER_MAX_AGE_HOURS, 12),
-  twitterMinViews: Math.floor(positiveNumber(process.env.TWITTER_MIN_VIEWS, 8_000)),
+  twitterMaxAgeHours: positiveNumber(process.env.TWITTER_MAX_AGE_HOURS, 4),
+  twitterMinViews: Math.floor(positiveNumber(process.env.TWITTER_MIN_VIEWS, 5_000)),
   twitterMinViewsPerHour: positiveNumber(process.env.TWITTER_MIN_VIEWS_PER_HOUR, 15_000),
+  twitterImmediateMultiplier: positiveNumber(process.env.TWITTER_IMMEDIATE_MULTIPLIER, 2),
   twitterMonthlyApiBudgetUsd: positiveNumber(process.env.TWITTER_MONTHLY_API_BUDGET_USD, 40),
   twitterMonthlyClaudeBudgetUsd: positiveNumber(process.env.TWITTER_MONTHLY_CLAUDE_BUDGET_USD, 20),
   twitterClaudeModel: "claude-sonnet-4-6",

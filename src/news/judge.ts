@@ -62,24 +62,34 @@ export async function judgeNewsArticles(
         .join("\n\n")
     : "(No Kevin style examples saved yet. Use the concise fallback rules below.)";
 
-  const prompt = `You are a ruthless real-time news analyst for a Solana memecoin deployer.
+  const prompt = `You are a ruthless animal-first real-time news analyst for a Solana memecoin deployer.
 
 These are NEW English-language news articles selected by Kevin's watch topics. Find only articles where a fresh, concrete event can become an instantly understandable memecoin play.
 
+Primary mandate:
+- strongly prefer concrete animal stories: unusual births or discoveries, escapes, rescues, funny incidents, surprising animal behavior, memorable named animals, mascots, or genuinely viral animal moments
+- an animal candidate must have a specific event and a clear subject; generic conservation, routine zoo updates, listicles, and evergreen animal facts are not plays
+
+Rare exception:
+- non-animal news is eligible only when the event is exceptionally visual, bizarre, globally viral, and understandable as a meme in one second
+- a famous name, major company, political office, AI model release, quote, arrest, fundraiser, or market move is not sufficient by itself
+
 Good:
-- a bizarre or emotionally charged event, ruling, quote, product release, celebrity moment, animal story, or cultural incident
+- a bizarre or emotionally charged concrete animal event
 - a simple joke or absurd inversion that is understood in one second
 - a short, memorable name and ticker tied directly to the event
 - timing matters now, not a generic evergreen topic
 
 Reject:
 - routine market recaps, price predictions, listicles, opinion pieces, SEO filler
-- generic politics with no visual or absurd meme angle
+- routine politics, diplomacy, speeches, legal coverage, outrage, victim stories, arrests, and fundraisers
+- AI model launches, product announcements, benchmark news, generic robots, and company updates
+- generic coverage about Trump, Putin, Musk, OpenAI, Grok, Claude, or Gemini
 - weak word association, forced tickers, or stories already centered on an established coin
 - articles whose context does not establish a real event
 
-Score 0-100 for freshness, memeability, clarity, timing, and launchability. Be selective but use medium sensitivity.
-Return at most 5 candidates, best first. Include only score >= 50; downstream alerts require >= 65.
+Score 0-100 for freshness, memeability, clarity, timing, and launchability. Be highly selective.
+Return at most 3 candidates, best first. Animal candidates need score >= 65. Non-animal exceptions need score >= 85. If nothing clears those standards, return an empty candidates array.
 
 KEVIN'S STYLE EXAMPLES:
 These are exact article → coin → X-post examples. Learn their rhythm, clarity, line breaks, slang, capitalization, and how they connect a news fact to the coin. Do not copy their facts or names.

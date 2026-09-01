@@ -5,6 +5,8 @@ import { ageHours, effectiveVelocity } from "./velocity.js";
 const REACTION = /^(omg|wow|wtf|lol|lmao|breaking|look at this|this is crazy|no way)[!.\s]*(https?:\/\/\S+)?$/i;
 const PROMOTION = /\b(presale|airdrop|contract address|ca:|buy now|mint live|token launch|pump\.fun)\b/i;
 
+export type OriginEligibility = "ineligible" | "watching" | "immediate" | "confirmed";
+
 export function passesCheapFilter(tweet: TwitterTweet, now = new Date()): boolean {
   if (ageHours(tweet, now) > config.twitterMaxAgeHours) return false;
   if (tweet.viewCount < config.twitterMinViews) return false;
@@ -14,10 +16,23 @@ export function passesCheapFilter(tweet: TwitterTweet, now = new Date()): boolea
 }
 
 export function isEligibleOrigin(origin: TwitterOrigin, now = new Date()): boolean {
-  return (
-    passesCheapFilter(origin, now) &&
-    effectiveVelocity(origin.approximateVelocity, origin.observedVelocity) >= config.twitterMinViewsPerHour
-  );
+  const eligibility = classifyOriginEligibility(origin, now);
+  return eligibility === "immediate" || eligibility === "confirmed";
+}
+
+export function classifyOriginEligibility(
+  origin: TwitterOrigin,
+  now = new Date(),
+): OriginEligibility {
+  if (!passesCheapFilter(origin, now)) return "ineligible";
+  if (origin.observedVelocity !== null) {
+    return origin.observedVelocity >= config.twitterMinViewsPerHour ? "confirmed" : "watching";
+  }
+  const multiplier = config.twitterImmediateMultiplier;
+  return origin.viewCount >= config.twitterMinViews * multiplier &&
+    origin.approximateVelocity >= config.twitterMinViewsPerHour * multiplier
+    ? "immediate"
+    : "watching";
 }
 
 export function rankOrigins(origins: TwitterOrigin[]): TwitterOrigin[] {
